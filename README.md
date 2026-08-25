@@ -1,6 +1,20 @@
 # SafeRLEval
 
-Reproducibility code for the paper **"Evaluating Safe Reinforcement Learning: A Safety Spectrum"**.
+Reproducibility code for the paper **"On the Evaluation Metrics of Safe Reinforcement Learning"** (NeurIPS 2026).
+
+## About this repository
+
+Safe reinforcement learning algorithms are commonly evaluated by reporting average episode cost alongside reward, but average cost alone is insufficient: it obscures whether a policy ever violates the safety constraint, how severely it does so when it does, and whether behaviour differs between training and test time.
+
+This repository accompanies the paper and provides:
+
+- **New evaluation metrics** — the violation rate $V$, the normalised cost deviation $D_{\text{norm}} = (\bar{c}-d)/d$, and the normalised violation magnitude $D^+_{\text{norm}}$ among violating episodes — each capturing a distinct aspect of safety that average cost misses.
+- **A safety tier system** (Tiers 0–4) that categorises algorithms based on IQM thresholds of $D_{\text{norm}}$, $V$, and $D^+_{\text{norm}}$, making it easy to compare algorithms at a glance.
+- **Aggregate CDF visualisation** of $D_{\text{norm}}$ across all conditions, with stratified bootstrap confidence bands, to show the full distribution rather than a single summary statistic.
+- **Per-condition histograms** of cost and reward distributions to reveal environment- and bound-specific behaviour hidden by aggregate metrics.
+- **A unified training and evaluation script** (`experiments/train/train.py`) that records both training-time and deterministic test-time metrics, with local CSV storage so the full evaluation pipeline runs without wandb.
+
+The `SafeRLEval/` Python package can be installed standalone (`pip install -e SafeRLEval/`) and used independently of the CRAX training library.
 
 ---
 
@@ -14,7 +28,6 @@ SafeRLEval/
 │   ├── common.py            ← shared constants, colours, plotting helpers
 │   └── plots/
 │       ├── cdf.py           ← aggregate CDF of D_norm
-│       ├── iqm_forest.py    ← IQM + 95% CI forest plot
 │       └── histograms.py    ← per-condition cost/reward histograms
 │
 └── experiments/
@@ -115,14 +128,6 @@ uv run python experiments/plots/plot_training_curves.py \
     --metrics reward cost
 ```
 
-**IQM forest plot**:
-
-```python
-from saferleval.plots import plot_iqm_figure
-plot_iqm_figure("figures/iqm_forest.pdf",
-                iqm_ci_csv="experiments/data/aggregate/safety_spectrum_iqm_ci.csv")
-```
-
 **Aggregate CDF**:
 
 ```python
@@ -164,9 +169,10 @@ plot_condition_histograms(
 ## Citation
 
 ```bibtex
-@article{spoor2025saferleval,
-  title  = {Evaluating Safe Reinforcement Learning: A Safety Spectrum},
+@article{spoor2026saferleval,
+  title  = {On the Evaluation Metrics of Safe Reinforcement Learning},
   author = {Spoor, Lindsay J.},
-  year   = {2025},
+  year   = {2026},
+  booktitle = {Advances in Neural Information Processing Systems},
 }
 ```
