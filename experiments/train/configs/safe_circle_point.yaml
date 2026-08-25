@@ -1,0 +1,21 @@
+# Safe Goal Point — paper experiment configuration
+# Run with:
+#   uv run python experiments/train/train.py \
+#       --env_name safe_goal_point --alg <ALG> --safety_bound <BOUND> \
+#       --seeds $(seq 0 29) $(cat experiments/train/configs/safe_goal_point.yaml | grep -v '#')
+
+env_name:               safe_circle_point
+difficulty:             1
+num_timesteps:          500000000        # 500 M steps
+env_kwargs:             '{"episode_length": 2000}'
+training_metrics_steps: 20000
+skip_video:             true
+
+# Paper sweeps
+# algos:        [ppo, ppo_lag, focops, p3o]
+# safety_bounds: [15, 25, 50]
+# seeds:        0..29  (30 seeds per condition)
+
+# Algorithm-specific defaults (passed per run)
+# ppo_lag / focops / p3o:
+lagrangian_coef_rate: 3.0

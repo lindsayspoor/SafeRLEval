@@ -1,0 +1,114 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "brax"
+version = "0.12.3"
+description = "A differentiable physics engine written in JAX."
+authors = [
+    { name = "Brax Authors", email = "no-reply@google.com" },
+]
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+keywords = [
+    "JAX",
+    "reinforcement learning",
+    "rigidbody",
+    "physics",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "absl-py==2.3.1",
+    "dataclasses; python_version < '3.7'",
+    "etils==1.13.0",
+    "flask",
+    "flask_cors==6.0.0",
+    "flax==0.10.6",
+    "jax==0.6.0",
+    "jaxlib==0.6.0",
+    "jaxopt==0.8.5",
+    "jinja2",
+    "ml_collections==1.1.0",
+    "mujoco==3.3.7",
+    "mujoco-mjx==3.3.7",
+    "numpy==2.2.6",
+    "optax==0.2.4",
+    "orbax-checkpoint==0.11.13",
+    "pandas",
+    "Pillow",
+    "scipy==1.15.3",
+    "tensorboardX==2.6.2.2",
+    "trimesh==4.6.9",
+    "typing-extensions",
+    "wandb>=0.22.3",
+    "imageio[ffmpeg]==2.37.0",
+    "matplotlib==3.10.3",
+]
+
+[project.optional-dependencies]
+develop = [
+    "pytest",
+    "transforms3d",
+    "gym",
+    "dm_env",
+]
+cuda = [
+    "jax-cuda12-plugin[with-cuda]==0.6.0",
+    "jax-cuda12-pjrt==0.6.0",
+]
+
+[project.urls]
+Homepage = "http://github.com/google/brax"
+
+[tool.hatch.build.targets.wheel]
+packages = ["brax"]
+exclude = [
+  "/datasets",
+  "/docs",
+  "/notebooks",
+  "/tests",
+  "brax/experimental/barkour/assets",
+  "brax/experimental/barkour/data",
+]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/datasets",
+    "/docs",
+    "/notebooks",
+    "brax/experimental/barkour/assets",
+    "brax/experimental/barkour/data",
+]
+
+[tool.isort]
+force_single_line = true
+force_sort_within_sections = true
+lexicographical = true
+single_line_exclusions = ["typing"]
+order_by_type = false
+group_by_package = true
+line_length = 120
+use_parentheses = true
+multi_line_output = 3
+skip_glob = ["**/*.ipynb"]
+
+[tool.pyink]
+line-length = 80
+unstable = true
+pyink-indentation = 2
+pyink-use-majority-quotes = true
+extend-exclude = '''(
+ .ipynb$
+)'''

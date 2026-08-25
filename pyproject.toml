@@ -1,0 +1,25 @@
+[project]
+name = "safe-rl-eval-paper"
+version = "0.1.0"
+description = "Reproducibility repo for the SafeRLEval paper"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "brax",                  # experiments/crax (editable)
+    "saferleval",            # SafeRLEval/ package (editable)
+    "wandb",
+    "pandas",
+    "numpy",
+    "matplotlib",
+    "scipy",
+    "pyyaml",
+    "jax-cuda12-plugin[with-cuda]==0.6.0; sys_platform == 'linux'",
+    "jax-cuda12-pjrt==0.6.0; sys_platform == 'linux'",
+]
+
+[tool.uv.sources]
+brax       = { path = "experiments/crax",  editable = true }
+saferleval = { path = "SafeRLEval",        editable = true }
+
+[build-system]
+requires      = ["hatchling"]
+build-backend = "hatchling.build"

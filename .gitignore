@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.DS_Store
+wandb/
+slurm_logs/
+*.log
+
+# Generated figures (commit selectively)
+experiments/plots/figures/
+
+# Local model checkpoints (large; not committed)
+experiments/train/models/
+
+# uv lock (commit this for reproducibility)
+# uv.lock
+experiments/crax/.venv/
+experiments/crax/.python-version

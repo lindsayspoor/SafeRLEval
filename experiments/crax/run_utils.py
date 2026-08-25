@@ -1,0 +1,915 @@
+import inspect
+import os
+import time
+from datetime import datetime
+from typing import Optional, Dict, Any, List
+
+import jax
+import mujoco
+import numpy as np
+import pandas as pd
+from PIL import ImageFont, Image, ImageDraw
+from imageio import v3 as iio
+from jax import numpy as jnp
+from matplotlib import pyplot as plt
+
+import wandb
+from brax import envs
+from brax.io import json as brax_json
+from brax.training.agents.focops import train as focops
+from brax.training.agents.p3o import train as p3o
+from brax.training.agents.ppo import train_ppo_cost
+from brax.training.agents.ppo.train import train as ppo_train
+from brax.training.agents.ppo_lag import train as ppo_lag
+from brax.training.agents.ppo_pid import train as ppo_pid
+from brax.training.agents.ppo_saute import train as ppo_saute
+from brax.training.agents.sac.train import train as sac_train
+from brax.training.agents.sac_lag import train as sac_lag
+from brax.training.agents.sac_pid import train as sac_pid
+
+# Global metrics buffer instance
+metrics_buffer = []
+
+
+def custom_progress_fn(num_steps: int, metrics: Dict[str, Any], use_wandb: bool = False, verbose: bool = True) -> None:
+    """
+    Progress function to print metrics and log to Weights & Biases.
+
+    Args:
+        num_steps: Current training step
+        metrics: Metrics dictionary
+        use_wandb: Whether to use wandb logging
+        verbose: Whether to print metrics to console
+    """
+    global metrics_buffer
+
+    def _mean_value(val):
+        # Convert JAX/NumPy arrays or lists/tuples to a scalar by averaging
+        arr = np.asarray(val)
+        # If it's already scalar, return item; otherwise mean
+        if arr.ndim == 0 or arr.size == 1:
+            return arr.reshape(-1)[0].item()
+        return arr.reshape(-1).mean().item()
+
+    if verbose:
+        print(f"Step {num_steps}:")
+
+    log_data = {}
+    for key, value in metrics.items():
+        value = _mean_value(value)
+        # Print only key categories to keep console light
+        if verbose and any(tok in key for tok in ("lambda", "cost", "constraint", "reward")):
+            print(f"  {key}: {value}")
+        log_data[key] = value
+
+    # If nothing to log, exit early
+    if not log_data:
+        return
+
+    metrics_buffer.append({"step": num_steps, **log_data})
+
+    if use_wandb and wandb.run is not None:
+        for row in metrics_buffer:
+            wandb.log({k: row[k] for k in log_data.keys()}, step=row["step"])  # log summarized scalars only
+        # clear the logged history from the buffer
+        metrics_buffer.clear()
+
+
+def setup_gpu_environment():
+    """Setup GPU environment for MuJoCo and XLA."""
+    # Configure MuJoCo to use the EGL rendering backend (requires GPU)
+    os.environ['MUJOCO_GL'] = 'egl'
+
+    # Tell XLA to use Triton GEMM, this improves steps/sec by ~30% on some GPUs
+    xla_flags = os.environ.get('XLA_FLAGS', '')
+    xla_flags += ' --xla_gpu_triton_gemm_any=True'
+    os.environ['XLA_FLAGS'] = xla_flags
+
+    # Check installation
+    try:
+        print('Checking that the installation succeeded:')
+        mujoco.MjModel.from_xml_string('<mujoco/>')
+        print('Installation successful.')
+    except Exception as e:
+        raise RuntimeError(
+            'Something went wrong during installation. Check the error message above '
+            'for more information.'
+        ) from e
+
+
+def get_algorithm_train_fn(alg_name: str):
+    """Get the appropriate training function based on algorithm name."""
+    alg_map = {
+        'ppo': ppo_train,
+        'ppo_cost': train_ppo_cost,
+        'ppo_lag': ppo_lag,
+        'ppo_pid': ppo_pid,
+        'ppo_saute': ppo_saute,
+        'p3o': p3o,
+        'focops': focops,
+        'sac': sac_train,
+        'sac_lag': sac_lag,
+        'sac_pid': sac_pid,
+    }
+
+    train_fn = alg_map.get(alg_name)
+    if train_fn is None:
+        available = [k for k, v in alg_map.items() if v is not None]
+        raise ValueError(f"Algorithm '{alg_name}' not available or not installed. Available: {available}")
+
+    return train_fn
+
+
+def filter_kwargs_for_fn(fn, cfg):
+    sig = inspect.signature(fn)
+    valid_keys = set(sig.parameters.keys())
+    return {k: v for k, v in cfg.items() if k in valid_keys}
+
+
+def make_vision_network_factory(alg_name: str, **vision_net_kwargs):
+    """Create a vision-aware network factory for the given algorithm.
+
+    Safe RL algorithms (ppo_lag, ppo_pid, focops, p3o) need a cost_value_network
+    in addition to policy and value networks. This factory ensures the correct
+    network is created based on the algorithm.
+
+    Args:
+        alg_name: Algorithm name (e.g., 'ppo', 'ppo_lag', 'focops').
+        **vision_net_kwargs: Extra kwargs passed to make_ppo_networks_vision
+            (e.g., normalise_channels, policy_obs_key, value_obs_key).
+
+    Returns:
+        A network_factory callable compatible with the PPO training loop.
+    """
+    from brax.training.agents.ppo.networks_vision import make_ppo_networks_vision
+
+    safe_algs = {'ppo_lag', 'ppo_pid', 'focops', 'p3o'}
+    needs_cost_value = alg_name in safe_algs
+
+    def network_factory(obs_size, action_size, **kwargs):
+        merged = {**vision_net_kwargs, **kwargs}
+        if needs_cost_value and 'cost_value_hidden_layer_sizes' not in merged:
+            merged['cost_value_hidden_layer_sizes'] = (256,) * 5
+        return make_ppo_networks_vision(
+            observation_size=obs_size,
+            action_size=action_size,
+            **merged,
+        )
+
+    return network_factory
+
+
+def collect_rollout_metrics(env_name: str, make_inference_fn, params,
+                            num_steps: int = 5000, seed: int = None,
+                            save_trajectory: bool = True,
+                            save_plots: bool = True,
+                            level: Optional[int] = None,
+                            env_kwargs: Optional[Dict[str, Any]] = None,
+                            safety_bound: Optional[float] = None,
+                            num_episodes: int = 1,
+                            output_dir: str = 'rollout_metrics') -> Dict[str, Any]:
+    """
+    Collect detailed metrics during a rollout.
+
+    If num_episodes > 1, additionally runs (num_episodes - 1) further
+    independent test episodes (beyond the one detailed/plotted rollout above)
+    purely to build a per-episode cost sample, from which test-time safety
+    stats are computed: violation rate and signed deviation from safety_bound
+    (the episodic cost limit), mirroring the same stats logged during training
+    by MetricsLogger. Raw per-episode costs and the summary are saved to
+    `output_dir` for offline cross-seed/cross-algorithm analysis.
+
+    Returns:
+        Dictionary containing all collected metrics, plus 'safety_summary'
+        (dict of test-time stats, or None if safety_bound is not given) and
+        'safety_episodes_path' (path to the saved per-episode CSV file).
+    """
+    # Create evaluation environment (with optional difficulty level)
+    eval_environment = envs.get_environment(env_name, level=level, **(env_kwargs or {}))
+
+    # JIT compile reset and step
+    jit_eval_reset = jax.jit(eval_environment.reset)
+    jit_eval_step = jax.jit(eval_environment.step)
+
+    # Create inference function
+    inference_fn = make_inference_fn(params)
+    jit_inference_fn = jax.jit(inference_fn)
+
+    print(f"Inference function for rollout created for {env_name}.")
+
+    # Initialize data collection
+    rollout_frames = []
+    rollout_metrics_data = {
+        'distance_to_goal': [],
+        'last_dist_goal': [],
+        'reward': [],
+        'dist_reward': [],
+        'goal_reward': [],
+        'orientation_reward': [],
+        'ctrl_cost': [],
+        'x_position': [],
+        'y_position': [],
+        'agent_pos_x': [],
+        'agent_pos_y': [],
+        'goal_pos_x': [],
+        'goal_pos_y': [],
+        'x_velocity': [],
+        'y_velocity': [],
+        'goals_reached_count': [],
+        'cost': []
+    }
+    actions = []
+
+    # Initialize rollout
+    if seed is None:
+        seed = int(time.time())
+    rng_rollout = jax.random.PRNGKey(seed)
+    eval_state = jit_eval_reset(rng_rollout)
+
+    print(f"Starting rollout for {num_steps} steps...")
+    for i in range(num_steps):
+        act_rng, rng_rollout = jax.random.split(rng_rollout)
+        action, _ = jit_inference_fn(eval_state.obs, act_rng)
+        actions.append(action)
+
+        eval_state = jit_eval_step(eval_state, action)
+        rollout_frames.append(eval_state.pipeline_state)
+
+        # Collect metrics from eval_state.metrics
+        rollout_metrics_data['distance_to_goal'].append(eval_state.metrics.get('distance_to_goal', np.nan))
+        rollout_metrics_data['reward'].append(eval_state.metrics.get('reward', np.nan))
+        rollout_metrics_data['cost'].append(eval_state.metrics.get('cost', np.nan))
+        rollout_metrics_data['dist_reward'].append(eval_state.metrics.get('dist_reward', np.nan))
+        rollout_metrics_data['goal_reward'].append(eval_state.metrics.get('goal_reward', np.nan))
+        rollout_metrics_data['orientation_reward'].append(eval_state.metrics.get('orientation_reward', np.nan))
+        rollout_metrics_data['ctrl_cost'].append(eval_state.metrics.get('ctrl_cost', np.nan))
+        rollout_metrics_data['x_position'].append(eval_state.metrics.get('x_position', np.nan))
+        rollout_metrics_data['y_position'].append(eval_state.metrics.get('y_position', np.nan))
+        rollout_metrics_data['x_velocity'].append(eval_state.metrics.get('x_velocity', np.nan))
+        rollout_metrics_data['y_velocity'].append(eval_state.metrics.get('y_velocity', np.nan))
+        rollout_metrics_data['goals_reached_count'].append(eval_state.metrics.get('goals_reached_count', np.nan))
+
+        # Collect metrics from eval_state.info
+        rollout_metrics_data['last_dist_goal'].append(eval_state.info.get('last_dist_goal', np.nan))
+        current_agent_pos = eval_state.info.get('agent_pos', np.array([np.nan, np.nan, np.nan]))
+        current_goal_pos = eval_state.info.get('goal_pos', np.array([np.nan, np.nan, np.nan]))
+        rollout_metrics_data['agent_pos_x'].append(current_agent_pos[0])
+        rollout_metrics_data['agent_pos_y'].append(current_agent_pos[1])
+        rollout_metrics_data['goal_pos_x'].append(current_goal_pos[0])
+        rollout_metrics_data['goal_pos_y'].append(current_goal_pos[1])
+
+        if i % 100 == 0 or i == num_steps - 1:
+            print(
+                f"Rollout step {i + 1}/{num_steps} completed. Goals reached: {eval_state.metrics.get('goals_reached_count', 0)}")
+
+        if eval_state.done:
+            def _scalar_bool(x):
+                x = jax.device_get(x)
+                x = np.asarray(x)
+                if x.size == 0:
+                    return False
+                return bool(x.reshape(-1)[0])
+
+            done_goal = _scalar_bool(eval_state.info.get('done_goal', False))
+            done_nan = _scalar_bool(eval_state.info.get('done_nan', False))
+            done_unhealthy = _scalar_bool(eval_state.info.get('done_unhealthy', False))
+            print(
+                f"Rollout terminated early at step {i + 1} due to done signal. "
+                f"done_goal={done_goal}, done_nan={done_nan}, done_unhealthy={done_unhealthy}"
+            )
+            remaining_steps = num_steps - (i + 1)
+            for key_metric in rollout_metrics_data.keys():
+                rollout_metrics_data[key_metric].extend([np.nan] * remaining_steps)
+            break
+
+    print("Rollout finished.")
+
+    # Save trajectory if requested
+    if save_trajectory:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        os.makedirs('trajectories', exist_ok=True)
+        rollout_trajectory_path = f'trajectories/{env_name}_rollout_{timestamp}.json'
+        brax_json.save(rollout_trajectory_path, eval_environment.sys, rollout_frames)
+        print(f"Rollout trajectory saved to {rollout_trajectory_path}")
+
+    # Create plots if requested
+    if save_plots:
+        create_rollout_plots(rollout_metrics_data, env_name)
+
+    # ============================== TEST-TIME SAFETY STATS ==============================
+    # Episode 1's cumulative cost comes from the detailed rollout above (NaN-padded
+    # tail from early termination is correctly ignored by nansum). Then run
+    # (num_episodes - 1) further, lightweight (unrendered) episodes purely to build
+    # a per-episode cost sample for the distributional safety stats.
+    episode_costs = [float(np.nansum(rollout_metrics_data['cost']))]
+    episode_rewards = [float(np.nansum(rollout_metrics_data['reward']))]
+
+    if num_episodes > 1:
+        print(f"Running {num_episodes - 1} additional test episode(s) for safety stats "
+              f"(up to {num_steps} steps each, unbatched -- this can take a while)...")
+    for ep in range(1, num_episodes):
+        ep_start = time.time()
+        ep_rng = jax.random.fold_in(rng_rollout, ep)
+        ep_state = jit_eval_reset(ep_rng)
+        cum_cost = 0.0
+        cum_reward = 0.0
+        n_steps = 0
+        for _ in range(num_steps):
+            act_rng, ep_rng = jax.random.split(ep_rng)
+            action, _ = jit_inference_fn(ep_state.obs, act_rng)
+            ep_state = jit_eval_step(ep_state, action)
+            cum_cost += float(ep_state.metrics.get('cost', 0.0))
+            cum_reward += float(ep_state.metrics.get('reward', 0.0))
+            n_steps += 1
+            if bool(ep_state.done):
+                break
+        episode_costs.append(cum_cost)
+        episode_rewards.append(cum_reward)
+        print(f"  test episode {ep + 1}/{num_episodes}: {n_steps} steps in {time.time() - ep_start:.1f}s, "
+              f"cost={cum_cost:.2f}, reward={cum_reward:.2f}")
+
+    safety_summary = None
+    if safety_bound is not None:
+        costs_arr = np.asarray(episode_costs)
+        deviation = costs_arr - safety_bound
+        violating_test = costs_arr[costs_arr > safety_bound]
+        safety_summary = {
+            'test/cost_violation_rate': float(np.mean(costs_arr > safety_bound)),
+            'test/cost_signed_dev_mean': float(np.mean(deviation)),
+            'test/cost_signed_dev_std': float(np.std(deviation)),
+            'test/cost_p90': float(np.percentile(costs_arr, 90)),
+            'test/cost_max': float(np.max(costs_arr)),
+            'test/cost_mean': float(np.mean(costs_arr)),
+            'test/cost_mean_violating': float(np.mean(violating_test)) if len(violating_test) > 0 else 0.0,
+            'test/reward_mean': float(np.mean(episode_rewards)),
+            'test/n_episodes': float(costs_arr.size),
+        }
+        print(f"Test-time safety summary over {costs_arr.size} episode(s):")
+        for k, v in safety_summary.items():
+            print(f"  {k}: {v:.4f}")
+
+    os.makedirs(output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    episodes_path = f'{output_dir}/{env_name}_test_episodes_{timestamp}.csv'
+    pd.DataFrame({
+        'episode': np.arange(len(episode_costs)),
+        'cost': episode_costs,
+        'reward': episode_rewards,
+    }).to_csv(episodes_path, index=False)
+    print(f"Test-time per-episode costs saved to {episodes_path}")
+
+    rollout_metrics_data['safety_summary'] = safety_summary
+    rollout_metrics_data['safety_episodes_path'] = episodes_path
+
+    return rollout_metrics_data
+
+
+def collect_deterministic_eval(
+    env_name: str,
+    make_inference_fn,
+    params,
+    num_episodes: int = 100,
+    episode_length: int = 2000,
+    seed: int = 0,
+    level: Optional[int] = None,
+    env_kwargs: Optional[Dict[str, Any]] = None,
+    safety_bound: Optional[float] = None,
+) -> Dict[str, float]:
+    """Run deterministic post-training episodes and return det_test/ summary stats.
+
+    Uses jax.lax.scan + jax.vmap so all episodes compile to a single GPU kernel.
+    Results are logged to wandb under det_test/* keys (separate from the stochastic
+    test/* keys produced by collect_rollout_metrics).
+    """
+    env = envs.get_environment(env_name, level=level, **(env_kwargs or {}))
+    policy_fn = make_inference_fn(params, deterministic=True)
+    jit_policy = jax.jit(policy_fn)
+
+    def run_one_episode(ep_key):
+        state = env.reset(ep_key)
+
+        def step_fn(carry, _):
+            state, rng, cum_cost, cum_reward, done = carry
+            rng, act_rng = jax.random.split(rng)
+            action, _ = jit_policy(state.obs, act_rng)
+            next_state = env.step(state, action)
+            cost   = next_state.metrics.get("cost",   jnp.zeros(()))
+            reward = next_state.metrics.get("reward", jnp.zeros(()))
+            cum_cost   = cum_cost   + jnp.where(done, 0.0, cost)
+            cum_reward = cum_reward + jnp.where(done, 0.0, reward)
+            new_done = done | (next_state.done > 0)
+            return (next_state, rng, cum_cost, cum_reward, new_done), None
+
+        init = (state, ep_key, jnp.zeros(()), jnp.zeros(()), jnp.bool_(False))
+        (_, _, cum_cost, cum_reward, _), _ = jax.lax.scan(
+            step_fn, init, None, length=episode_length
+        )
+        return cum_cost, cum_reward
+
+    ep_keys = jax.random.split(jax.random.PRNGKey(seed), num_episodes)
+    batch_run = jax.jit(jax.vmap(run_one_episode))
+
+    print(f"Running {num_episodes} deterministic episodes (compiling on first call)...")
+    t0 = time.time()
+    cum_costs, cum_rewards = batch_run(ep_keys)
+    print(f"  done in {time.time() - t0:.1f}s")
+
+    costs   = np.asarray(cum_costs)
+    rewards = np.asarray(cum_rewards)
+
+    summary: Dict[str, float] = {
+        "det_test/cost_mean":            float(np.mean(costs)),
+        "det_test/reward_mean":          float(np.mean(rewards)),
+        "det_test/n_episodes":           float(costs.size),
+    }
+    if safety_bound is not None:
+        deviation = costs - safety_bound
+        violating_det = costs[costs > safety_bound]
+        summary.update({
+            "det_test/cost_violation_rate":  float(np.mean(costs > safety_bound)),
+            "det_test/cost_signed_dev_mean": float(np.mean(deviation)),
+            "det_test/cost_signed_dev_std":  float(np.std(deviation)),
+            "det_test/cost_p90":             float(np.percentile(costs, 90)),
+            "det_test/cost_max":             float(np.max(costs)),
+            "det_test/cost_mean_violating":  float(np.mean(violating_det)) if len(violating_det) > 0 else 0.0,
+        })
+
+    print("Deterministic eval summary:")
+    for k, v in summary.items():
+        print(f"  {k}: {v:.4f}")
+    return summary
+
+
+def create_rollout_plots(rollout_metrics_data: Dict[str, List], env_name: str) -> None:
+    """Create and save plots from rollout metrics."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plot_dir = 'plots'
+    os.makedirs(plot_dir, exist_ok=True)
+    plot_path_base = f'{plot_dir}/{env_name}_rollout_{timestamp}'
+
+    num_steps = len(rollout_metrics_data['distance_to_goal'])
+    time_steps = np.arange(num_steps)
+
+    plt.style.use('seaborn-v0_8-darkgrid')
+
+    # Plot 1: Distance and Last Distance to Goal
+    plt.figure(figsize=(12, 7))
+    plt.plot(time_steps, rollout_metrics_data['distance_to_goal'], label='Current Distance to Goal', linestyle='-')
+    plt.plot(time_steps, rollout_metrics_data['last_dist_goal'], label='Last Distance to Goal', linestyle='--')
+    plt.xlabel("Time Step")
+    plt.ylabel("Distance")
+    plt.title(f"{env_name} - Rollout: Goal Tracking")
+    plt.legend()
+    plt.tight_layout()
+    goal_tracking_plot_path = f'{plot_path_base}_goal_distances.png'
+    plt.savefig(goal_tracking_plot_path)
+    plt.close()
+    print(f"Goal tracking plot saved to: {goal_tracking_plot_path}")
+
+    # Plot 2: Cost Plot
+    plt.figure(figsize=(12, 7))
+    plt.plot(time_steps, rollout_metrics_data['cost'], label='Cost', linestyle='-')
+    plt.xlabel("Time Step")
+    plt.ylabel("Cost")
+    plt.title(f"{env_name} - Rollout: Cost")
+    plt.legend()
+    plt.tight_layout()
+    cost_plot_path = f'{plot_path_base}_cost.png'
+    plt.savefig(cost_plot_path)
+    plt.close()
+    print(f"Cost plot saved to: {cost_plot_path}")
+
+    # Plot 3: Cumulative Cost
+    cumulative_cost = np.cumsum(rollout_metrics_data['cost'])
+    plt.figure(figsize=(12, 7))
+    plt.plot(time_steps, cumulative_cost, label='Cumulative Cost', color='red')
+    plt.xlabel("Time Step")
+    plt.ylabel("Cumulative Cost")
+    plt.title(f"{env_name} - Rollout: Cumulative Cost Over Time")
+    plt.legend()
+    plt.tight_layout()
+    cumulative_cost_plot_path = f'{plot_path_base}_cumulative_cost.png'
+    plt.savefig(cumulative_cost_plot_path)
+    plt.close()
+    print(f"Cumulative cost plot saved to: {cumulative_cost_plot_path}")
+
+    # Plot 4: Reward Component Breakdown
+    plt.figure(figsize=(12, 7))
+    plt.plot(time_steps, rollout_metrics_data['dist_reward'], label='Distance Reward', alpha=0.7)
+    plt.plot(time_steps, rollout_metrics_data['goal_reward'], label='Goal Reward', alpha=0.7)
+    plt.plot(time_steps, rollout_metrics_data['orientation_reward'], label='Orientation Reward', alpha=0.7)
+    plt.plot(time_steps, -np.array(rollout_metrics_data['ctrl_cost']), label='Negative Control Cost', alpha=0.7)
+    plt.plot(time_steps, rollout_metrics_data['reward'], label='Total Reward', linestyle='--', color='black',
+             linewidth=2)
+    plt.xlabel("Time Step")
+    plt.ylabel("Reward Value")
+    plt.title(f"{env_name} - Rollout: Reward Component Breakdown")
+    plt.legend()
+    plt.tight_layout()
+    reward_breakdown_plot_path = f'{plot_path_base}_reward_breakdown.png'
+    plt.savefig(reward_breakdown_plot_path)
+    plt.close()
+    print(f"Reward breakdown plot saved to: {reward_breakdown_plot_path}")
+
+    # Plot 5: X-Y Trajectory
+    plt.figure(figsize=(10, 8))
+    valid_x = np.array(rollout_metrics_data['x_position'])
+    valid_y = np.array(rollout_metrics_data['y_position'])
+    goal_x_series = np.array(rollout_metrics_data['goal_pos_x'])
+    goal_y_series = np.array(rollout_metrics_data['goal_pos_y'])
+
+    # Filter out NaNs
+    valid_indices_agent = ~(np.isnan(valid_x) | np.isnan(valid_y))
+    valid_x_agent = valid_x[valid_indices_agent]
+    valid_y_agent = valid_y[valid_indices_agent]
+
+    valid_indices_goal = ~(np.isnan(goal_x_series) | np.isnan(goal_y_series))
+    valid_x_goal = goal_x_series[valid_indices_goal]
+    valid_y_goal = goal_y_series[valid_indices_goal]
+
+    if len(valid_x_agent) > 0 and len(valid_y_agent) > 0:
+        plt.plot(valid_x_agent, valid_y_agent, 'k-', alpha=0.7, label='Agent Path')
+        plt.scatter(valid_x_agent[0], valid_y_agent[0], c='green', s=100, label='Agent Start', zorder=5, marker='o')
+        plt.scatter(valid_x_agent[-1], valid_y_agent[-1], c='red', s=100, label='Agent End', zorder=5, marker='x')
+
+        if len(valid_x_goal) > 0 and len(valid_y_goal) > 0:
+            plt.scatter(valid_x_goal[0], valid_y_goal[0], c='blue', s=150, label='Initial Goal', zorder=4, marker='*')
+            if any(g_x != valid_x_goal[0] for g_x in valid_x_goal) or any(
+                    g_y != valid_y_goal[0] for g_y in valid_y_goal):
+                plt.plot(valid_x_goal, valid_y_goal, 'b--', alpha=0.5, label='Goal Path')
+                plt.scatter(valid_x_goal[-1], valid_y_goal[-1], c='purple', s=150, label='Final Goal', zorder=4,
+                            marker='*')
+
+        plt.xlabel("X Position")
+        plt.ylabel("Y Position")
+        plt.title(f"{env_name} - Rollout: X-Y Trajectory")
+        plt.legend()
+        plt.axis('equal')
+        plt.grid(True)
+    else:
+        plt.text(0.5, 0.5, "No valid position data for trajectory plot", ha='center', va='center')
+
+    plt.tight_layout()
+    trajectory_plot_path = f'{plot_path_base}_xy_trajectory.png'
+    plt.savefig(trajectory_plot_path)
+    plt.close()
+    print(f"X-Y trajectory plot saved to: {trajectory_plot_path}")
+
+
+def record_episode_video(
+        env,
+        make_inference_fn,
+        params,
+        steps: int = 2500,
+        cameras: List[str] | List[int] = (0,),  # camera names or ids
+        width: int = 320,
+        height: int = 240,
+        fps: int = 100,
+        frame_stride=1,
+        out_name: str = "rollout",
+        log_to_wandb: bool = True,
+        seed: int = 0,
+        show_metrics: bool = True,  # Print the cost on the screen
+        font: str = "DejaVuSans-Bold",  # Font for overlay text, if available
+        num_episodes: int = 1,
+):
+    """
+    Render one or more fresh eval episodes controlled by your trained policy.
+    Steps the env for observations/actions, and in parallel steps a MuJoCo
+    simulator for pretty pixels. All recorded episodes are concatenated in
+    sequence into a single video per camera.
+    """
+    # 1) Ensure headless GPU rendering (you might need to do this before importing mujoco)
+    os.environ.setdefault("MUJOCO_GL", "egl")
+
+    start_time = os.times()
+
+    # 2) JIT policy
+    infer = jax.jit(make_inference_fn(params))
+    reset_fn = env.reset
+    step_fn = env.step
+
+    @jax.jit
+    def rollout_one(key):
+        state = reset_fn(key)
+
+        def step_body(carry, _):
+            state, key = carry
+            key, sk = jax.random.split(key)
+            action, _ = infer(state.obs, sk)
+            next_state = step_fn(state, action)
+
+            frame = next_state.pipeline_state  # for render
+            reward = next_state.reward  # scalar
+            # Be robust to envs without a 'cost' signal
+            cost = next_state.info.get("cost", jnp.zeros_like(next_state.reward))  # scalar
+            # Also mark termination if env signals done OR NaNs appear in obs/reward
+            obs_for_nan = next_state.obs
+            if isinstance(obs_for_nan, dict):
+                # Vision mode: only check state vector, not pixel arrays
+                obs_for_nan = obs_for_nan.get('state', jnp.zeros(()))
+            nan_done = jnp.isnan(reward) | jnp.any(jnp.isnan(obs_for_nan))
+            done_base = jnp.asarray(next_state.done, dtype=bool)
+            done_flag = jnp.logical_or(done_base, nan_done)
+            done_goal = next_state.info.get("done_goal", jnp.zeros_like(done_base, dtype=bool))
+            done_nan = next_state.info.get("done_nan", jnp.zeros_like(done_base, dtype=bool))
+            done_unhealthy = next_state.info.get(
+                "done_unhealthy", jnp.zeros_like(done_base, dtype=bool)
+            )
+
+            return (next_state, key), (frame, reward, cost, done_flag, done_goal, done_nan, done_unhealthy)
+
+        (final_state, _), (frames, rewards, costs, dones, done_goal, done_nan, done_unhealthy) = jax.lax.scan(
+            step_body, (state, key), xs=None, length=steps
+        )
+        return frames, rewards, costs, dones, done_goal, done_nan, done_unhealthy
+
+    # 3) Run N episodes to collect frames
+    key = jax.random.PRNGKey(seed)
+
+    all_frames = []  # list of pipeline_state lists (concatenated later)
+    all_rewards = []  # list of np arrays after downsampling per episode
+    all_costs = []  # list of np arrays after downsampling per episode
+
+    for ep in range(max(1, int(num_episodes))):
+        key, ep_key = jax.random.split(key)
+        frames_batched, rewards_batched, costs_batched, dones_batched, done_goal_batched, done_nan_batched, done_unhealthy_batched = rollout_one(
+            ep_key)
+
+        frames_batched = jax.device_get(frames_batched)
+        rewards_batched_np = np.asarray(jax.device_get(rewards_batched))
+        costs_batched_np = np.asarray(jax.device_get(costs_batched))
+        dones_batched_np = np.asarray(jax.device_get(dones_batched)).astype(bool)
+        done_goal_np = np.asarray(jax.device_get(done_goal_batched)).astype(bool)
+        done_nan_np = np.asarray(jax.device_get(done_nan_batched)).astype(bool)
+        done_unhealthy_np = np.asarray(jax.device_get(done_unhealthy_batched)).astype(bool)
+
+        # Trim to first termination if any
+        if dones_batched_np.ndim == 0:
+            done_index = int(dones_batched_np)
+        else:
+            done_hits = np.where(dones_batched_np)[0]
+            done_index = int(done_hits[0] + 1) if done_hits.size > 0 else int(rewards_batched_np.shape[0])
+
+        T = int(done_index)
+        if done_index > 0:
+            idx = done_index - 1
+
+            # Handle possible batch dimension by taking the first element
+            def _first(x):
+                return x[idx][0] if x.ndim > 1 else x[idx]
+
+            print(
+                f"Done flags at step {idx}: "
+                f"goal={_first(done_goal_np)}, "
+                f"nan={_first(done_nan_np)}, "
+                f"unhealthy={_first(done_unhealthy_np)}"
+            )
+        frames = [jax.tree.map(lambda x, i=i: x[i], frames_batched) for i in range(T)]
+
+        # Downsample per episode
+        keep_idx = np.arange(0, T, frame_stride, dtype=int)
+        frames = [frames[i] for i in keep_idx]
+
+        # Compute per-episode cumulative (reset each episode)
+        cum_rewards = np.cumsum(rewards_batched_np[:T])
+        cum_costs = np.cumsum(costs_batched_np[:T])
+
+        # Keep values aligned with kept frames
+        rewards_kept = rewards_batched_np[:T][keep_idx]
+        costs_kept = costs_batched_np[:T][keep_idx]
+        cum_rewards_kept = cum_rewards[keep_idx]
+        cum_costs_kept = cum_costs[keep_idx]
+
+        # Stash
+        all_frames.extend(frames)
+        # Store tuples so we can overlay later without recomputing
+        all_rewards.extend(list(zip(rewards_kept, cum_rewards_kept)))
+        all_costs.extend(list(zip(costs_kept, cum_costs_kept)))
+
+    print("Rollouts took %.2f seconds." % (os.times()[4] - start_time[4]))
+    start_time = os.times()
+
+    # 4) Render the concatenated episodes
+    for camera in cameras:
+        rendering = env.render(all_frames, width=width, height=height, camera=camera)
+        print("Rendering took %.2f seconds." % (os.times()[4] - start_time[4]))
+
+        # 5) Add reward/cost overlay
+        if show_metrics:
+            start_time = os.times()
+            rendering_with_metrics = []
+            try:
+                # Try to load a font, fallback to default if not available
+                font_obj = ImageFont.truetype(f"{font}.ttf", 20)
+            except (OSError, IOError):
+                font_obj = ImageFont.load_default()
+
+            # Flatten stored rewards/costs tuples for overlay
+            # all_rewards[i] = (inst_reward, cum_reward); all_costs[i] likewise
+            for i, frame in enumerate(rendering):
+                r_inst, r_cum = all_rewards[i]
+                c_inst, c_cum = all_costs[i]
+
+                img = Image.fromarray(frame.astype(np.uint8))
+                draw = ImageDraw.Draw(img)
+
+                reward_text = f"Reward: {float(r_cum):.2f}"
+                cost_text = f"Cost: {float(c_cum):.2f}"
+
+                text_color_reward = (50, 220, 50)  # Green text
+                text_color_cost = (230, 60, 60)  # Red text
+                outline_color = (0, 0, 0)  # Black outline
+
+                x_rew, y_rew = 10, 10
+                x_cost, y_cost = 10, 40
+
+                draw.text((x_rew, y_rew), reward_text, font=font_obj, fill=text_color_reward, stroke_width=2,
+                          stroke_fill=outline_color)
+                draw.text((x_cost, y_cost), cost_text, font=font_obj, fill=text_color_cost, stroke_width=2,
+                          stroke_fill=outline_color)
+
+                rendering_with_metrics.append(np.array(img))
+
+            rendering = rendering_with_metrics
+            print("Overlay text took %.2f seconds." % (os.times()[4] - start_time[4]))
+
+        # 6) Save mp4 (and log)
+        file_name = f"{out_name}_{camera}.mp4"
+        os.makedirs("videos", exist_ok=True)
+        mp4_path = os.path.join("videos", file_name)
+        iio.imwrite(mp4_path, np.stack(rendering), fps=fps)
+
+        if log_to_wandb and wandb.run is not None:
+            wandb.log({f"video/{camera}": wandb.Video(mp4_path, fps=fps, format="mp4")})
+
+        print("Saved video:", mp4_path)
+
+
+def record_episode_video_simple(
+        env,
+        steps: int = 500,
+        policy=None,
+        action_mode: str = "random",
+        cameras: List[str] | List[int] = (0,),
+        width: int = 320,
+        height: int = 240,
+        fps: int = 50,
+        frame_stride: int = 1,
+        out_name: str = "rollout",
+        seed: int = 0,
+        show_metrics: bool = True,
+        font: str = "DejaVuSans-Bold",
+        num_episodes: int = 1,
+        extra_metrics: Optional[List[str]] = None,
+):
+    """
+    Record episode video with optional policy or simple action modes.
+
+    This is a simpler version of record_episode_video that doesn't require
+    make_inference_fn + params. Useful for tests and quick visualizations.
+
+    Args:
+        env: The environment to record.
+        steps: Number of steps per episode.
+        policy: Optional callable (obs, rng) -> (action, extra). If None, uses action_mode.
+        action_mode: How to generate actions if policy is None.
+            - "random": Uniform random actions in [-1, 1].
+            - "zero": Zero actions.
+            - "periodic": Sinusoidal periodic actions.
+        cameras: List of camera names or IDs to render.
+        width: Video width.
+        height: Video height.
+        fps: Video frames per second.
+        frame_stride: Only keep every N frames.
+        out_name: Base name for output video file.
+        seed: Random seed.
+        show_metrics: Whether to overlay reward/cost text on frames.
+        font: Font name for overlay text.
+        num_episodes: Number of episodes to record.
+        extra_metrics: Optional list of additional metric names to display.
+
+    Returns:
+        Path to the saved video file.
+    """
+    os.environ.setdefault("MUJOCO_GL", "egl")
+
+    reset_fn = jax.jit(env.reset)
+    step_fn = jax.jit(env.step)
+
+    if policy is not None:
+        jit_policy = jax.jit(policy)
+    else:
+        jit_policy = None
+
+    action_size = env.action_size
+
+    def get_action(obs, rng, t):
+        if jit_policy is not None:
+            action, _ = jit_policy(obs, rng)
+            return action
+        elif action_mode == "random":
+            return jax.random.uniform(rng, (action_size,), minval=-1.0, maxval=1.0)
+        elif action_mode == "zero":
+            return jnp.zeros(action_size)
+        elif action_mode == "periodic":
+            phases = jnp.linspace(0.0, 2 * jnp.pi, num=action_size, endpoint=False)
+            omega = 0.2
+            scale = 0.5
+            return scale * jnp.sin(omega * t + phases)
+        else:
+            raise ValueError(f"Unknown action_mode: {action_mode}")
+
+    all_frames = []
+    all_rewards = []
+    all_costs = []
+    all_extra = {k: [] for k in (extra_metrics or [])}
+
+    key = jax.random.PRNGKey(seed)
+
+    for ep in range(max(1, int(num_episodes))):
+        key, ep_key = jax.random.split(key)
+        state = reset_fn(ep_key)
+
+        ep_frames = []
+        ep_rewards = []
+        ep_costs = []
+        ep_extra = {k: [] for k in (extra_metrics or [])}
+
+        cum_reward = 0.0
+        cum_cost = 0.0
+
+        for t in range(steps):
+            key, step_key = jax.random.split(key)
+            action = get_action(state.obs, step_key, t)
+            state = step_fn(state, action)
+
+            ep_frames.append(state.pipeline_state)
+
+            r = float(np.asarray(jax.device_get(state.reward)).reshape(()))
+            c = state.info.get("cost", state.metrics.get("cost", jnp.array(0.0)))
+            c = float(np.asarray(jax.device_get(c)).reshape(()))
+
+            cum_reward += r
+            cum_cost += c
+            ep_rewards.append((r, cum_reward))
+            ep_costs.append((c, cum_cost))
+
+            for mk in (extra_metrics or []):
+                val = state.metrics.get(mk, state.info.get(mk, jnp.array(np.nan)))
+                ep_extra[mk].append(float(np.asarray(jax.device_get(val)).reshape(())))
+
+            done = bool(np.asarray(jax.device_get(state.done)).reshape(()))
+            if done or np.isnan(r):
+                break
+
+        keep_idx = list(range(0, len(ep_frames), frame_stride))
+        all_frames.extend([ep_frames[i] for i in keep_idx])
+        all_rewards.extend([ep_rewards[i] for i in keep_idx])
+        all_costs.extend([ep_costs[i] for i in keep_idx])
+        for mk in (extra_metrics or []):
+            all_extra[mk].extend([ep_extra[mk][i] for i in keep_idx])
+
+        print(f"Episode {ep + 1}/{num_episodes}: {len(ep_frames)} steps, "
+              f"reward={cum_reward:.2f}, cost={cum_cost:.2f}")
+
+    video_path = None
+    for camera in cameras:
+        rendering = env.render(all_frames, width=width, height=height, camera=camera)
+
+        if show_metrics:
+            try:
+                font_obj = ImageFont.truetype(f"{font}.ttf", 14)
+            except (OSError, IOError):
+                font_obj = ImageFont.load_default()
+
+            out_frames = []
+            for i, frame in enumerate(rendering):
+                _, r_cum = all_rewards[i]
+                _, c_cum = all_costs[i]
+
+                img = Image.fromarray(frame.astype(np.uint8))
+                draw = ImageDraw.Draw(img)
+
+                texts = [
+                    (f"Reward: {r_cum:.2f}", (50, 220, 50)),
+                    (f"Cost: {c_cum:.2f}", (230, 60, 60)),
+                ]
+                for mk in (extra_metrics or []):
+                    val = all_extra[mk][i]
+                    texts.append((f"{mk}: {val:.3f}", (200, 200, 255)))
+
+                for idx, (txt, color) in enumerate(texts):
+                    draw.text((10, 10 + 25 * idx), txt, font=font_obj, fill=color,
+                              stroke_width=2, stroke_fill=(0, 0, 0))
+
+                out_frames.append(np.array(img))
+            rendering = out_frames
+
+        os.makedirs("videos", exist_ok=True)
+        file_name = f"{out_name}_{camera}.mp4" if len(cameras) > 1 else f"{out_name}.mp4"
+        video_path = os.path.join("videos", file_name)
+        iio.imwrite(video_path, np.stack(rendering), fps=fps)
+        print(f"Saved video: {video_path}")
+
+    return video_path
