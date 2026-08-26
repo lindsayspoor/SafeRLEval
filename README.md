@@ -6,7 +6,7 @@ Safe reinforcement learning algorithms are commonly evaluated by reporting the c
 
 This repository accompanies the paper and provides:
 
-- **New evaluation metrics**: the violation rate $V$, the normalised cost deviation $D_{\text{norm}} = (\bar{c}-d)/d$, and the normalised violation magnitude $D^+_{\text{norm}}$ among violating episodes, each capturing a distinct aspect of safety that average cost misses.
+- **New evaluation metrics**: the violation rate $V$, the mean normalised cost deviation $D_{\text{norm}}$, and the normalised violation magnitude $D^+_{\text{norm}}$ among violating episodes, each capturing a distinct aspect of safety that average cost misses.
 - **A safety tier system**: (Tiers 0–4) that categorises algorithms based on thresholds of $D_{\text{norm}}$, $V$, and $D^+_{\text{norm}}$.
 - **Aggregate CDF visualisation** to show the full distribution.
 - **Per-condition histograms** of episodic cost distributions to reveal task- and bound-specific behavior hidden by aggregate metrics.
