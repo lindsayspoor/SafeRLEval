@@ -1,6 +1,6 @@
 # SafeRLEval
 
-Reproducibility code for the paper "On the Evaluation Metrics of Safe Reinforcement Learning" (under review).
+Reproducibility code for the paper "Evaluation Metrics for Safe Reinforcement Learning" (under review).
 
 Safe reinforcement learning algorithms are commonly evaluated by reporting the cost on average, alongside the average reward. We argue that average cost alone is insufficient to capture safety and reliability of an algorithm: it does not indicate whether a policy ever violates the safety constraint, how severely it does so when it does, and whether behaviour differs between training and test time.
 
