@@ -9,12 +9,17 @@ build/
 wandb/
 slurm_logs/
 *.log
+*.csv
 
-# Generated figures (commit selectively)
-experiments/plots/figures/
 
-# Local model checkpoints (large; not committed)
-experiments/train/models/
+
+figures/
+models/
+trajectories/
+plots/
+data/
+rollout_metrics/
+saved_data/
 
 # uv lock (commit this for reproducibility)
 # uv.lock

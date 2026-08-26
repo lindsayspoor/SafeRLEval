@@ -1,31 +1,42 @@
 #!/usr/bin/env python3
-"""Plot training curves averaged over seeds, fetched directly from wandb.
+"""Plot training curves averaged over seeds.
 
-Built for SLURM array jobs (scripts/slurm_train.sh): each array task trains one
-seed of the same env/algo/level combo and logs to its own wandb run. This script
-queries wandb for all runs matching env/algo/level, groups them by seed *and* by
-the 'safety_bound' (cost limit) each run was trained with, and plots mean +/- std
-bands per metric, per (algo, cost limit) group. The cost subplot also gets a red
-dashed line at each distinct safety bound.
+Two data sources are supported:
 
-Reuses results/common.py from the vendored CRAX/ checkout (already on sys.path
-via its editable install), same as scripts/train.py.
+  Local mode  — reads *_history.csv files written by train.py (no wandb needed).
+  Wandb mode  — fetches run histories directly from a wandb project.
 
-Example (matching scripts/slurm_train.sh, run from the project root):
-    uv run python scripts/plot_seed_curves.py \\
-        --project crax --envs safe_goal_point --algos ppo_lag --level 1 \\
+Usage
+-----
+Local (pass --data_dir pointing at experiments/data/raw/ or similar):
+
+    uv run python experiments/plots/plot_training_curves.py \\
+        --data_dir experiments/data/raw/ \\
+        --envs safe_goal_point --algos ppo_lag focops p3o \\
+        --metrics reward cost
+
+Wandb (pass --project; requires wandb access):
+
+    uv run python experiments/plots/plot_training_curves.py \\
+        --project <wandb-project> \\
+        --envs safe_goal_point --algos ppo_lag --level 1 \\
         --metrics reward cost training/lambda_lagr
 """
 
 import argparse
 import colorsys
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import wandb
+
+try:
+    import wandb
+except ImportError:
+    wandb = None  # type: ignore[assignment]
 
 from results.common import (
     DEFAULT_METRIC_COLS,
@@ -87,13 +98,116 @@ def resolve_wandb_keys(metrics: List[str], algos: List[str], env: str) -> List[s
     return sorted(keys)
 
 
+# Ordered fallback column names for local CSVs (tried left-to-right until one is found).
+# "eval/episode_*" is logged at every callback; "episodic/*" only at the final step.
+_LOCAL_CSV_FALLBACKS: Dict[str, List[str]] = {
+    "reward": ["eval/episode_reward", "episodic/reward"],
+    "cost":   ["eval/episode_cost",   "episodic/cost"],
+}
+
+
 def extract_series(df: pd.DataFrame, metric: str, algo: str, env: str) -> Optional[pd.Series]:
     if metric in ("reward", "cost"):
-        return get_series(df, algo=algo, metric=metric, metric_cols=DEFAULT_METRIC_COLS, env_name=env)
+        # Pick the candidate with the most non-NaN values so that local-CSV columns
+        # that log at every eval step beat wandb-style columns that only appear once.
+        best: Optional[pd.Series] = None
+        for col in _LOCAL_CSV_FALLBACKS.get(metric, []):
+            if col in df.columns:
+                s = df[col].astype(np.float32)
+                if best is None or s.notna().sum() > best.notna().sum():
+                    best = s
+        wandb_s = get_series(df, algo=algo, metric=metric, metric_cols=DEFAULT_METRIC_COLS, env_name=env)
+        if wandb_s is not None:
+            if best is None or wandb_s.notna().sum() > best.notna().sum():
+                best = wandb_s
+        return best
     if metric not in df.columns:
         return None
     return df[metric].astype(np.float32)
 
+
+# ---------------------------------------------------------------------------
+# Local CSV helpers
+# ---------------------------------------------------------------------------
+
+_RUN_NAME_RE = re.compile(
+    r"^(?P<env>.+)_Level_(?P<level>\d+)_(?P<algo>.+)_bound(?P<bound>[\d.]+)_seed(?P<seed>\d+)_"
+)
+
+
+def _parse_run_name(stem: str) -> Optional[dict]:
+    """Extract env/level/algo/bound/seed from a history CSV filename stem."""
+    # stem: {env}_Level_{level}_{algo}_bound{bound}_seed{seed}_{timestamp}
+    # Split at first '_bound' occurrence to separate algo from bound+seed.
+    bound_split = stem.split("_bound")
+    if len(bound_split) < 2:
+        return None
+    try:
+        before = bound_split[0]                              # "{env}_Level_{level}_{algo}"
+        after  = "_bound".join(bound_split[1:])              # "{bound}_seed{seed}_{ts}"
+        env, _, level_algo = before.partition("_Level_")
+        level_str, _, algo = level_algo.partition("_")
+        bound_str, _, rest = after.partition("_seed")
+        seed_str = rest.split("_")[0]
+        return {
+            "env":   env,
+            "level": int(level_str),
+            "algo":  algo,
+            "bound": float(bound_str),
+            "seed":  int(seed_str),
+        }
+    except (ValueError, AttributeError):
+        return None
+
+
+def _load_history_csv(path: Path) -> Optional[pd.DataFrame]:
+    """Load a long-format history CSV and pivot to wide format (_step + metric columns)."""
+    try:
+        df = pd.read_csv(path)
+        if not {"step", "metric", "value"}.issubset(df.columns):
+            return None
+        wide = df.pivot_table(index="step", columns="metric", values="value", aggfunc="first")
+        wide.columns.name = None
+        return wide.reset_index().rename(columns={"step": "_step"})
+    except Exception:
+        return None
+
+
+def _load_local_grouped(
+    data_dir: str,
+    env: str,
+    algo: str,
+    level: int,
+    seeds: Optional[List[int]],
+    safety_bounds: Optional[List[float]],
+    max_seeds: Optional[int],
+) -> Dict[Optional[float], Dict[int, pd.DataFrame]]:
+    """Load history CSVs for one (env, algo) pair, grouped by bound -> seed -> DataFrame."""
+    grouped: Dict[Optional[float], Dict[int, pd.DataFrame]] = {}
+    for csv_path in sorted(Path(data_dir).glob("*_history.csv")):
+        meta = _parse_run_name(csv_path.stem.replace("_history", ""))
+        if meta is None:
+            continue
+        if meta["env"] != env or meta["algo"] != algo or meta["level"] != level:
+            continue
+        if seeds and meta["seed"] not in seeds:
+            continue
+        if safety_bounds and meta["bound"] not in safety_bounds:
+            continue
+        seed_map = grouped.setdefault(meta["bound"], {})
+        if meta["seed"] in seed_map:
+            continue
+        if max_seeds and len(seed_map) >= max_seeds:
+            continue
+        df = _load_history_csv(csv_path)
+        if df is not None:
+            seed_map[meta["seed"]] = df
+    return grouped
+
+
+# ---------------------------------------------------------------------------
+# Wandb helpers
+# ---------------------------------------------------------------------------
 
 def build_filters(env: str, algo: str, level: int, seeds: Optional[List[int]], state: str,
                    wandb_tags: List[str], safety_bounds: Optional[List[float]] = None) -> dict:
@@ -165,7 +279,11 @@ def fetch_grouped_runs(api: wandb.Api, args: argparse.Namespace, env: str, algo:
 
 def plot(args: argparse.Namespace) -> None:
     set_mpl_style()
-    api = wandb.Api()
+
+    use_wandb = getattr(args, "project", None) is not None
+    if use_wandb:
+        import wandb as _wandb
+        api = _wandb.Api()
 
     envs = args.envs
     metrics = args.metrics
@@ -192,7 +310,13 @@ def plot(args: argparse.Namespace) -> None:
         metric_keys = resolve_wandb_keys(metrics, args.algos, env)
 
         for algo in args.algos:
-            grouped = fetch_grouped_runs(api, args, env, algo, metric_keys)
+            if use_wandb:
+                grouped = fetch_grouped_runs(api, args, env, algo, metric_keys)
+            else:
+                grouped = _load_local_grouped(
+                    args.data_dir, env, algo, args.level,
+                    args.seeds, args.safety_bounds, args.max_seeds,
+                )
             if not grouped:
                 print(f"No matching runs for env={env} algo={algo} level={args.level}")
                 continue
@@ -301,8 +425,16 @@ def plot(args: argparse.Namespace) -> None:
 
 
 def build_args() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Plot mean +/- std training curves over seeds, from wandb.")
-    p.add_argument("--project", type=str, required=True, help="WandB project name (e.g. 'crax').")
+    p = argparse.ArgumentParser(
+        description="Plot mean ± std training curves. Pass --data_dir for local mode or --project for wandb mode.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    # Data source — exactly one must be provided
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument("--data_dir", type=str, default=None,
+                     help="Directory of *_history.csv files from train.py (local mode).")
+    src.add_argument("--project",  type=str, default=None,
+                     help="WandB project name (wandb mode).")
     p.add_argument("--envs", type=str, nargs="+", default=["safe_goal_point"], help="Environment name(s).")
     p.add_argument("--algos", type=str, nargs="+", default=["ppo_lag"], help="Algorithm name(s).")
     p.add_argument("--level", type=int, default=1, help="Difficulty level.")

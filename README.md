@@ -1,48 +1,20 @@
 # SafeRLEval
 
-Reproducibility code for the paper **"On the Evaluation Metrics of Safe Reinforcement Learning"** (NeurIPS 2026).
+Reproducibility code for the paper "On the Evaluation Metrics of Safe Reinforcement Learning" (under review).
 
-## About this repository
-
-Safe reinforcement learning algorithms are commonly evaluated by reporting average episode cost alongside reward, but average cost alone is insufficient: it obscures whether a policy ever violates the safety constraint, how severely it does so when it does, and whether behaviour differs between training and test time.
+Safe reinforcement learning algorithms are commonly evaluated by reporting the cost on average, alongside the average reward. We argue that average cost alone is insufficient to capture safety and reliability of an algorithm: it does not indicate whether a policy ever violates the safety constraint, how severely it does so when it does, and whether behaviour differs between training and test time.
 
 This repository accompanies the paper and provides:
 
-- **New evaluation metrics** — the violation rate $V$, the normalised cost deviation $D_{\text{norm}} = (\bar{c}-d)/d$, and the normalised violation magnitude $D^+_{\text{norm}}$ among violating episodes — each capturing a distinct aspect of safety that average cost misses.
-- **A safety tier system** (Tiers 0–4) that categorises algorithms based on IQM thresholds of $D_{\text{norm}}$, $V$, and $D^+_{\text{norm}}$, making it easy to compare algorithms at a glance.
-- **Aggregate CDF visualisation** of $D_{\text{norm}}$ across all conditions, with stratified bootstrap confidence bands, to show the full distribution rather than a single summary statistic.
-- **Per-condition histograms** of cost and reward distributions to reveal environment- and bound-specific behaviour hidden by aggregate metrics.
-- **A unified training and evaluation script** (`experiments/train/train.py`) that records both training-time and deterministic test-time metrics, with local CSV storage so the full evaluation pipeline runs without wandb.
+- **New evaluation metrics**: the violation rate $V$, the normalised cost deviation $D_{\text{norm}} = (\bar{c}-d)/d$, and the normalised violation magnitude $D^+_{\text{norm}}$ among violating episodes, each capturing a distinct aspect of safety that average cost misses.
+- **A safety tier system**: (Tiers 0–4) that categorises algorithms based on thresholds of $D_{\text{norm}}$, $V$, and $D^+_{\text{norm}}$.
+- **Aggregate CDF visualisation** to show the full distribution.
+- **Per-condition histograms** of episodic cost distributions to reveal task- and bound-specific behavior hidden by aggregate metrics.
 
-The `SafeRLEval/` Python package can be installed standalone (`pip install -e SafeRLEval/`) and used independently of the CRAX training library.
-
----
-
-## Repository layout
-
-```
-SafeRLEval/
-├── SafeRLEval/              ← installable evaluation library
-│   ├── safety_spectrum.py   ← fetch metrics from wandb (IQM, V, D_norm, D+_norm)
-│   ├── spectrum_from_cache.py ← recompute metrics from local CSV (no wandb needed)
-│   ├── common.py            ← shared constants, colours, plotting helpers
-│   └── plots/
-│       ├── cdf.py           ← aggregate CDF of D_norm
-│       └── histograms.py    ← per-condition cost/reward histograms
-│
-└── experiments/
-    ├── crax/                ← modified CRAX safe-RL library (editable install)
-    ├── train/
-    │   ├── train.py         ← training + deterministic evaluation in one script
-    │   └── configs/         ← one YAML per environment (paper hyperparameters)
-    ├── data/
-    │   ├── raw/             ← per-run CSVs written by train.py
-    │   └── aggregate/       ← aggregate CSVs produced by SafeRLEval/safety_spectrum.py
-    └── plots/
-        └── plot_training_curves.py  ← training curve plotter (reads wandb or local CSVs)
-```
+The `SafeRLEval/` Python package can be installed standalone (`pip install -e SafeRLEval/`) and used independently of the experiments/ folder used for the purpose of reproducing our results.
 
 ---
+
 
 ## Installation
 
@@ -55,16 +27,64 @@ uv sync          # creates .venv and installs all dependencies
 ```
 
 This installs:
-- `experiments/crax/` as the editable `brax` package (the modified CRAX library).
+- `experiments/crax/` as the editable `brax` package (the modified CRAX library, original library from https://github.com/TTomilin/CRAX/tree/main).
 - `SafeRLEval/` as the editable `saferleval` package.
 
 ---
 
-## Reproducing experiments
+## Quick test
+
+Run the full pipeline in a few minutes using the quicktest config:
+
+```bash
+# make sure older runs in this folder don't mix in with your evaluation
+rm -rf experiments/data/raw/ experiments/data/aggregate/
+
+# 1. Train
+uv run python experiments/train/train.py \
+    --config experiments/train/configs/quicktest.yaml \
+    --alg ppo_lag --safety_bound 25 --seeds 0 1 --no_wandb
+
+# 2. Compute metrics
+uv run python SafeRLEval/evaluate.py experiments/data/raw/
+
+# 3. Plot training curves
+uv run python experiments/plots/plot_training_curves.py \
+    --data_dir experiments/data/raw/ \
+    --envs safe_goal_point --algos ppo_lag --metrics reward cost
+
+# 4. Plot aggregate CDF
+uv run python SafeRLEval/saferleval/plots/cdf.py \
+    experiments/data/aggregate/runs.csv \
+    --out figures/quicktest_cdf.pdf
+
+# 5. Plot per-condition histograms
+uv run python SafeRLEval/saferleval/plots/histograms.py \
+    experiments/data/aggregate/runs.csv \
+    --out figures/quicktest_hist.pdf --metric test_cost
+```
+
+
+---
+
+## Usage
 
 ### 1. Train
 
 Each run trains one seed of one algorithm on one environment with one cost limit.
+
+Per-environment configs with the paper hyperparameters are in `experiments/train/configs/`.
+Pass one with `--config` and override individual values on the command line as needed:
+
+```bash
+uv run python experiments/train/train.py \
+    --config experiments/train/configs/safe_goal_point.yaml \
+    --alg ppo_lag \
+    --safety_bound 25 \
+    --seeds 0 1 2 3 4
+```
+
+Or specify all hyperparameters explicitly:
 
 ```bash
 uv run python experiments/train/train.py \
@@ -77,102 +97,100 @@ uv run python experiments/train/train.py \
     --lagrangian_coef_rate 3.0
 ```
 
-Results are saved to **wandb** (if `--use_wandb` is set, the default) **and** to local CSVs in `experiments/data/raw/`:
-- `{run_name}_history.csv` — per-step training metrics (for training curve plots).
-- `{run_name}_summary.csv` — one-row summary compatible with `spectrum_from_cache.py`.
-
+Results are saved to wandb(default) and to local CSVs in `experiments/data/raw/`.
 To disable wandb and use local storage only:
 
 ```bash
-uv run python experiments/train/train.py --no_wandb ...
+uv run python experiments/train/train.py \
+    --config experiments/train/configs/safe_goal_point.yaml \
+    --alg ppo_lag --safety_bound 25 --seeds 0 1 2 3 4 \
+    --no_wandb
 ```
-
-Paper sweep: 4 environments × 4 algorithms × 3 cost limits × 30 seeds.  
-See `experiments/train/configs/` for the exact hyperparameters used per environment.
 
 ### 2. Evaluate (aggregate metrics)
 
-**From wandb** (requires wandb access):
+Metrics are computed with `SafeRLEval/evaluate.py`.
+
+#### Option A: local CSVs (no wandb required)
+
+After training, pass the directory of per-run summary files written by `train.py`:
 
 ```bash
-uv run python SafeRLEval/safety_spectrum.py \
+uv run python SafeRLEval/evaluate.py experiments/data/raw/
+```
+
+All `*_summary.csv` files in that directory are combined automatically.
+You can optionally filter by algorithm, environment, or safety bound:
+
+```bash
+uv run python SafeRLEval/evaluate.py experiments/data/raw/ \
+    --algos ppo ppo_lag focops p3o \
+    --envs safe_goal_point safe_circle_point \
+    --safety_bounds 15 25 50
+```
+
+#### Option B: wandb
+
+If you logged runs to wandb, pass `--project` instead of a source path.
+`--envs`, `--algos`, and `--safety_bounds` are required in this mode:
+
+```bash
+uv run python SafeRLEval/evaluate.py \
     --project <wandb-project> \
     --envs safe_goal_point safe_circle_point safe_push_point safe_button_point \
     --algos ppo ppo_lag focops p3o \
     --safety_bounds 15 25 50 \
-    --deterministic_test \
-    --output_data_dir experiments/data/aggregate
+    --deterministic_test
 ```
 
-**From local CSVs** (no wandb needed):
-
-```bash
-# First combine per-run summaries into one raw CSV:
-cat experiments/data/raw/*_summary.csv > experiments/data/aggregate/safety_spectrum_raw.csv
-
-# Then recompute metrics:
-uv run python SafeRLEval/spectrum_from_cache.py \
-    experiments/data/aggregate/safety_spectrum_raw.csv \
-    --algos ppo ppo_lag focops p3o
-```
+Both modes print per-condition and aggregate metric tables to the terminal output and write
+output CSVs to `experiments/data/aggregate/` (override with `--output_data_dir`).
 
 ### 3. Plot
 
-**Training curves** (from wandb):
+**Training curves (local)**:
+
+```bash
+uv run python experiments/plots/plot_training_curves.py \
+    --data_dir experiments/data/raw/ \
+    --envs safe_goal_point \
+    --algos ppo ppo_lag focops p3o \
+    --metrics reward cost
+```
+
+**Training curves (wandb)**:
 
 ```bash
 uv run python experiments/plots/plot_training_curves.py \
     --project <wandb-project> \
     --envs safe_goal_point \
-    --algos ppo_lag \
+    --algos ppo ppo_lag focops p3o \
     --metrics reward cost
 ```
 
 **Aggregate CDF**:
 
-```python
-from saferleval.plots import plot_agg_cdf_figure
-plot_agg_cdf_figure(
-    raw_csv_path="experiments/data/aggregate/safety_spectrum_raw.csv",
-    out_path="figures/agg_cdf.pdf",
-    algos=["ppo", "ppo_lag", "focops", "p3o"],
-    x_min=-1.0, x_max=3.0,
-)
+```bash
+uv run python SafeRLEval/saferleval/plots/cdf.py \
+    experiments/data/aggregate/runs.csv \
+    --out figures/agg_cdf.pdf \
+    --algos ppo ppo_lag focops p3o \
+    --x_min -1.0 --x_max 3.0
 ```
 
 **Per-condition histograms**:
 
-```python
-from saferleval.plots import plot_condition_histograms
-plot_condition_histograms(
-    raw_csv_path="experiments/data/aggregate/safety_spectrum_raw.csv",
-    out_path="figures/hist_test_cost.pdf",
-    metric="test_cost",
-)
+```bash
+uv run python SafeRLEval/saferleval/plots/histograms.py \
+    experiments/data/aggregate/runs.csv \
+    --out figures/hist_test_cost.pdf \
+    --metric test_cost \
+    --algos ppo ppo_lag focops p3o
 ```
 
 ---
 
-## Metrics
-
-| Symbol | Definition |
-|--------|-----------|
-| $\bar{R}$ | Mean episode reward |
-| $\bar{C}$ | Mean episode cost |
-| $V$ | Violation rate: fraction of episodes where $c > d$ |
-| $D_{\text{norm}} = (\bar{c}-d)/d$ | Normalised cost deviation; $< 0$ = safe |
-| $D^+_{\text{norm}} = (\bar{c}^+ - d)/d$ | Mean overshoot among violating episodes only |
-| IQM | Interquartile mean (middle 50%) over conditions |
-
----
 
 ## Citation
 
-```bibtex
-@article{spoor2026saferleval,
-  title  = {On the Evaluation Metrics of Safe Reinforcement Learning},
-  author = {Spoor, Lindsay J.},
-  year   = {2026},
-  booktitle = {Advances in Neural Information Processing Systems},
-}
-```
+The paper and repo are currently under review.

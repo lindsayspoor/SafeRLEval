@@ -1,0 +1,14 @@
+# Quick-test configuration — runs the full pipeline in a few minutes.
+# Uses a single environment, algorithm, cost limit, and seed at reduced timesteps.
+# Results will not be meaningful, but the full train → evaluate → plot pipeline
+# will execute and produce outputs you can inspect.
+
+env_name:               safe_goal_point
+difficulty:             1
+num_timesteps:          1000000          # 1 M steps (~2–5 min depending on hardware)
+env_kwargs:             '{"episode_length": 500}'
+training_metrics_steps: 10000
+num_evals:              5                # log episodic reward/cost 5× during training
+skip_video:             true
+skip_rollout:           true             # skip CRAX rollout collection (not needed for metrics demo)
+lagrangian_coef_rate:   3.0

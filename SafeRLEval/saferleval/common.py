@@ -1,6 +1,5 @@
-"""Shared constants and plotting utilities for SafeRLEval.
-
-Copied from CRAX/results/common.py and extended with SafeRLEval-specific entries.
+"""Shared constants and plotting utilities.
+copy from CRAX/results/common.py and extended with specific entries for the purpose of this project.
 """
 from __future__ import annotations
 
@@ -13,23 +12,20 @@ import pandas as pd
 
 
 TRANSLATIONS = {
-    # Metrics
-    "reward": "Reward",
-    "cost": "Cost",
-    # Algorithms
-    "ppo":      "PPO",
+    "reward":"Reward",
+    "cost":"Cost",
+    "ppo": "PPO",
     "ppo_cost": "PPOCost",
-    "ppo_lag":  "PPO-Lag",
-    "ppo_pid":  "PPOPID",
+    "ppo_lag": "PPO-Lag",
+    "ppo_pid":"PPOPID",
     "ppo_saute":"PPOSaute",
-    "p3o":      "P3O",
-    "focops":   "FOCOPS",
-    # Environments
-    "safe_goal_point":   "Safe Goal Point",
-    "safe_push_point":   "Safe Push Point",
+    "p3o": "P3O",
+    "focops": "FOCOPS",
+    "safe_goal_point": "Safe Goal Point",
+    "safe_push_point": "Safe Push Point",
     "safe_circle_point": "Safe Circle Point",
     "safe_button_point": "Safe Button Point",
-    "safe_reacher":      "Safe Reacher",
+    "safe_reacher": "Safe Reacher",
 }
 
 _tab10 = cm.get_cmap("tab10").colors
@@ -55,15 +51,15 @@ DEFAULT_REWARD_METRIC = "episodic/reward"
 def set_mpl_style() -> None:
     plt.style.use("seaborn-v0_8-paper")
     plt.rcParams.update({
-        "figure.dpi":      300,
-        "font.size":       12.5,
-        "axes.titlesize":  16,
-        "axes.labelsize":  14,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
+        "figure.dpi":300,
+        "font.size":12.5,
+        "axes.titlesize":16,
+        "axes.labelsize":14,
+        "xtick.labelsize":12,
+        "ytick.labelsize":12,
         "legend.fontsize": 12.5,
-        "lines.linewidth": 2.2,
-        "axes.linewidth":  1.2,
+        "lines.linewidth":2.2,
+        "axes.linewidth":1.2,
     })
 
 
