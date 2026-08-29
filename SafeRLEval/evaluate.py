@@ -93,7 +93,6 @@ def _build_per_point(df: pd.DataFrame, args: argparse.Namespace) -> Dict[str, Li
 
 
 def _print_tables(new_metrics, agg_metrics, iqm_ci, algos) -> None:
-    """Print two table sets: (1) training + det_test, (2) stochastic test + det_test."""
     for splits, heading in [
         (["train",       "final_greedy"], "TABLE SET 1: TRAINING  &  FINAL POLICY (GREEDY)"),
         (["final_expl",  "final_greedy"], "TABLE SET 2: FINAL POLICY (EXPLORATION)  &  FINAL POLICY (GREEDY)"),

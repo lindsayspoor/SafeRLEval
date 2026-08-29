@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
 """Safety metrics for Safe RL evaluation.
-
-Metrics:
-  V: violation rate
-  D_norm: mean normalized cost deviation
-  D+_norm: normalized violation magnitude = (bar{C} − d) / d  (violating episodes only)
-  IQM:interquartile mean over per-condition values
-  Bootstrap CI: stratified bootstrap 95% CIs for IQM
 """
 
 import json
@@ -114,7 +107,6 @@ def std_over_seeds(rows: List[dict], field: str) -> Optional[float]:
 
 def _d_plus_for_split(cell: dict, split: str, bound: float,
                        ep_key: str, means: dict, stds: dict):
-    """Compute (D+_norm, D+_norm_std) for one split using per-episode costs when available."""
     ep = cell.get(ep_key)
     if ep:
         return (compute_d_plus_norm_from_episodes(ep, bound),
@@ -129,9 +121,6 @@ def _d_plus_for_split(cell: dict, split: str, bound: float,
 
 def compute_new_metrics(per_algo_cells: Dict[str, List[dict]],
                          algos: List[str]) -> Dict[str, List[dict]]:
-    """Compute r̄, c̄, V, D_norm, D+_norm per (algo, task, bound) for all three splits:
-    train (exploration) / final policy (exploration) / final policy (greedy).
-    """
     result: Dict[str, List[dict]] = {}
     for algo in algos:
         algo_rows = []
@@ -201,7 +190,6 @@ def compute_new_metrics(per_algo_cells: Dict[str, List[dict]],
 
 def compute_aggregate_new_metrics(new_metrics: Dict[str, List[dict]],
                                    algos: List[str]) -> Dict[str, dict]:
-    """Mean and IQM of V, D_norm, D+_norm across all (task, bound) cells per algorithm."""
     result: Dict[str, dict] = {}
     keys = (
         "R_bar_train",       "R_bar_final_expl",       "R_bar_final_greedy",
@@ -223,7 +211,6 @@ def compute_aggregate_new_metrics(new_metrics: Dict[str, List[dict]],
 
 
 def _per_seed_derived(cache_rows: List[dict]) -> dict:
-    """Per-seed derived metrics grouped by (algo, task, bound) for stratified bootstrap"""
     from collections import defaultdict
     groups: dict = defaultdict(lambda: defaultdict(list))
 
@@ -299,7 +286,7 @@ def _per_seed_derived(cache_rows: List[dict]) -> dict:
                 except (ValueError, TypeError, json.JSONDecodeError):
                     pass
             if not added:
-                # Fallback: use aggregate stats so bootstrap CI can still be computed.
+
                 vr_val  = row.get(vr_col)
                 cmv_val = row.get(cmv_col)
                 try:
@@ -319,7 +306,7 @@ def _per_seed_derived(cache_rows: List[dict]) -> dict:
 def compute_iqm_bootstrap_ci(cache_rows: List[dict], algos: List[str],
                                n_bootstrap: int = 2000,
                                alpha: float = 0.05) -> Dict[str, dict]:
-    """Stratified bootstrap 95% CI for the IQM of each aggregate metric"""
+
     per_seed    = _per_seed_derived(cache_rows)
     metric_keys = [
         "R_bar_train",       "R_bar_final_expl",       "R_bar_final_greedy",
@@ -371,8 +358,7 @@ _SPLIT_DISPLAY = {"train": "training", "final_expl": "final policy (exploration)
 
 
 def _split_of_key(key: str) -> Optional[str]:
-    """Return which evaluation split a metric key belongs to."""
-    for s in ("final_greedy", "final_expl", "train"):  # longest first so 'test' doesn't match 'det_test'
+    for s in ("final_greedy", "final_expl", "train"):  
         if key.endswith(f"_{s}"):
             return s
     return None
@@ -380,10 +366,7 @@ def _split_of_key(key: str) -> Optional[str]:
 
 def print_per_cell_new_metrics(new_metrics: Dict[str, List[dict]], algos: List[str],
                                 splits: Optional[List[str]] = None) -> None:
-    """Print per (task, bound) table: bar{R}, bar{C}, V, D_norm, D+_norm for each algorithm.
 
-    splits: subset of ["train","final_expl","final_greedy"] to show; None = all three.
-    """
     keys_seen: List = []
     keys_set: set = set()
     for algo in algos:
@@ -445,10 +428,7 @@ def print_per_cell_new_metrics(new_metrics: Dict[str, List[dict]], algos: List[s
 
 def print_aggregate_new_metrics(agg: Dict[str, dict], algos: List[str],
                                  splits: Optional[List[str]] = None) -> None:
-    """Print aggregate mean and IQM of V, D_norm, D+_norm across all tasks x bounds.
 
-    splits: subset of ["train","test","det_test"] to show; None = all three.
-    """
     all_metric_groups = [
         ("R̄_tr",    "R_bar_train_mean",              "R_bar_train_iqm"),
         ("R̄_fe",    "R_bar_final_expl_mean",         "R_bar_final_expl_iqm"),
@@ -508,10 +488,7 @@ def print_aggregate_new_metrics(agg: Dict[str, dict], algos: List[str],
 def print_iqm_bootstrap_table(agg: Dict[str, dict], ci: Dict[str, dict],
                                algos: List[str],
                                splits: Optional[List[str]] = None) -> None:
-    """Print IQM with 95% bootstrap CI table.
 
-    splits: subset of ["train","test","det_test"] to show; None = all three.
-    """
     all_metric_groups = [
         ("R̄_tr",   "R_bar_train"),
         ("R̄_fe",   "R_bar_final_expl"),

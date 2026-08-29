@@ -92,7 +92,6 @@ def run_det_episodes(policy_fn, env_name: str, safety_bound: float,
 
 
 class _LocalWriter:
-    """Buffer per-step training metrics, write history + summary in CSV format."""
 
     _STEP_KEYS = [
         "eval/episode_reward",
@@ -138,13 +137,6 @@ class _LocalWriter:
 
     def save_summary(self, train_final: dict, det_summary: dict,
                      stoch_ep_summary: dict = None) -> Path:
-        """Write a one-row CSV.
-
-        Columns:
-          train_*      — training-window averages
-          test_*       — stochastic final-policy evaluation
-          det_test_*   — deterministic final-policy evaluation
-        """
         path = self.data_dir / f"{self.run_name}_summary.csv"
 
         def _mean(key):
@@ -166,14 +158,14 @@ class _LocalWriter:
             "train_violation_rate":      _mean("episodic/cost_violation_rate"),
             "train_cost_mean_violating": _mean("episodic/cost_mean_violating"),
 
-            # Stochastic final-policy test
+            # final-policy (exploration)
             "test_reward":               s.get("det_test/reward_mean"),
             "test_cost":                 s.get("det_test/cost_mean"),
             "test_violation_rate":       s.get("det_test/cost_violation_rate"),
             "test_cost_mean_violating":  s.get("det_test/cost_mean_violating"),
             "test_episode_costs":        json.dumps(s.get("det_test/episode_costs", [])),
 
-            # Deterministic final-policy test
+            # Deterministic final-policy (greedy)
             "det_test_reward":               det_summary.get("det_test/reward_mean"),
             "det_test_cost":                 det_summary.get("det_test/cost_mean"),
             "det_test_violation_rate":       det_summary.get("det_test/cost_violation_rate"),
@@ -320,7 +312,6 @@ def main():
         )
         print("Training finished.")
 
-        # Log final metrics to wandb summary
         final_log: dict = {}
         if final_metrics:
             for k, v in final_metrics.items():
@@ -335,7 +326,7 @@ def main():
             wandb.run.summary.update(final_log)
 
 
-        # Stochastic rollout evaluation
+
         if not config.skip_rollout:
             print("\nStochastic rollout evaluation...")
             rollout_metrics = collect_rollout_metrics(
@@ -355,14 +346,14 @@ def main():
             if use_wandb and wandb.run is not None and safety_summary:
                 wandb.run.summary.update(safety_summary)
 
-        # Deterministic evaluation
+
         print("\nDeterministic evaluation...")
         det_ep_length = episode_length or getattr(eval_env, "episode_length", 2000) or 2000
         det_env_kwargs = dict(env_kwargs)
         if "episode_length" not in det_env_kwargs:
             det_env_kwargs["episode_length"] = det_ep_length
 
-        # Try collect_deterministic_eval from run_utils first
+
         try:
             det_summary = collect_deterministic_eval(
                 env_name=env_name,
@@ -389,7 +380,7 @@ def main():
                 seed=seed,
             )
 
-        # Ensure per-episode cost list is always present (needed for CDF plots).
+
         if not det_summary.get("det_test/episode_costs"):
             policy_fn = make_inference_fn(params, deterministic=True)
             ep_summary = run_det_episodes(
@@ -414,7 +405,7 @@ def main():
         if use_wandb and wandb.run is not None:
             wandb.run.summary.update(det_summary)
 
-        # Stochastic per-episode evaluation (for stochastic CDF and D+_norm).
+
         print("\nStochastic per-episode evaluation...")
         stoch_policy_fn = make_inference_fn(params, deterministic=False)
         stoch_ep_summary = run_det_episodes(
@@ -427,7 +418,7 @@ def main():
             env_kwargs=det_env_kwargs,
             seed=seed,
         )
-        # Log stochastic metrics to wandb under test/ prefix
+
         if use_wandb and wandb.run is not None:
             wandb.run.summary.update({
                 "test/reward_mean":          stoch_ep_summary.get("det_test/reward_mean"),
@@ -437,7 +428,7 @@ def main():
                 "test/episode_costs":        stoch_ep_summary.get("det_test/episode_costs"),
             })
 
-        # Local CSV save (always)
+
         local_writer.save_history()
         local_writer.save_summary(final_log, det_summary, stoch_ep_summary)
 

@@ -1,18 +1,4 @@
 """Overlapping final-policy cost histograms: exploration vs greedy, per algorithm.
-
-For a single env and one or more safety bounds, plots an (n_algos × n_bounds) grid.
-Each cell overlays the per-episode cost distribution of:
-  - the final policy with exploration noise  (test_episode_costs)
-  - the final policy evaluated greedily      (det_test_episode_costs)
-Each cell uses its own x-axis range, derived from that (algo, bound) pair's data.
-Error bars show ±1σ across seeds.  The cost limit d is marked as a vertical dashed
-line.  Column headers show the bound value; row labels show the algorithm name.
-
-Usage:
-    uv run python SafeRLEval/saferleval/plotting/hist.py \\
-        experiments/data/aggregate/runs.csv \\
-        --env safe_goal_point --bounds 15 25 50 \\
-        --out figures/hist_goal.pdf
 """
 from __future__ import annotations
 
@@ -27,9 +13,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# =============================================================================
-# STYLE — mirror of plot_paper.py
-# =============================================================================
 
 FONT_FAMILY     = "times new roman"
 FONT_SIZE       = 24
@@ -78,9 +61,7 @@ ALGO_LABELS = {
     "sac_pid":   "SAC-PID",
 }
 
-# =============================================================================
-# Style application
-# =============================================================================
+
 
 def _apply_rcparams() -> None:
     mpl.rcParams.update({
@@ -98,16 +79,13 @@ def _apply_rcparams() -> None:
         "ps.fonttype":       42,
     })
 
-# =============================================================================
-# Colour helpers
-# =============================================================================
+
 
 def _color_for(algo: str) -> str:
     return ALGO_COLORS.get(algo, "#555555")
 
 
 def _lighten(color, amount: float = LIGHTEN):
-    """Blend a colour toward white."""
     try:
         r, g, b = mcolors.to_rgb(color)
     except Exception:
@@ -117,9 +95,6 @@ def _lighten(color, amount: float = LIGHTEN):
             b + (1 - b) * amount)
 
 
-# =============================================================================
-# Data helpers
-# =============================================================================
 
 def _parse_ep_costs(raw) -> Optional[np.ndarray]:
     if raw is None or (isinstance(raw, float) and np.isnan(raw)):
@@ -145,7 +120,6 @@ def _collect(df_algo: pd.DataFrame, col: str) -> List[np.ndarray]:
 
 def _seed_densities(seed_arrays: List[np.ndarray],
                     bin_edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Mean ± std density across seeds (each seed weighted equally)."""
     n_bins = len(bin_edges) - 1
     if not seed_arrays:
         return np.zeros(n_bins), np.zeros(n_bins)
@@ -162,7 +136,6 @@ def _seed_densities(seed_arrays: List[np.ndarray],
 
 
 def _metrics(seed_arrays: List[np.ndarray], bound: float) -> Tuple[float, float]:
-    """Return (V, D+_norm) averaged over seeds."""
     if not seed_arrays:
         return float("nan"), float("nan")
     V_vals, dp_vals = [], []
@@ -173,15 +146,12 @@ def _metrics(seed_arrays: List[np.ndarray], bound: float) -> Tuple[float, float]
             dp_vals.append((float(np.mean(viol)) - bound) / bound)
     return float(np.mean(V_vals)), (float(np.mean(dp_vals)) if dp_vals else 0.0)
 
-# =============================================================================
-# Drawing
-# =============================================================================
+
 
 def _draw_policy_bars(ax, seed_arrays: List[np.ndarray], bin_edges: np.ndarray,
                        color, edge_color,
                        width_frac: float, alpha: float, zorder: int,
                        hatch: Optional[str] = None) -> None:
-    """Draw density bars with ±1σ error bars."""
     bw      = bin_edges[1] - bin_edges[0]
     centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
     mean, std = _seed_densities(seed_arrays, bin_edges)
@@ -198,7 +168,6 @@ def _draw_policy_bars(ax, seed_arrays: List[np.ndarray], bin_edges: np.ndarray,
 
 
 def _natural_ticks(x_lo: float, x_hi: float, n_ticks: int = 4) -> np.ndarray:
-    """Pick ~n_ticks nicely rounded tick positions within [x_lo, x_hi]."""
     span = x_hi - x_lo
     if span <= 0:
         return np.array([x_lo])
@@ -221,14 +190,13 @@ def _draw_panel(ax,
                 show_ylabel: bool,
                 show_col_title: bool,
                 show_algo_title: bool) -> None:
-    """Draw one (algo, bound) cell of the grid."""
     base_col   = _color_for(algo)
     expl_col   = _lighten(base_col)
     greedy_col = base_col
 
     algo_label = ALGO_LABELS.get(algo, algo)
 
-    # Per-cell bin edges from pooled expl + greedy episode costs.
+
     all_costs = [c for arrs in (expl_arrs, greedy_arrs) for arr in arrs for c in arr]
     if not all_costs:
         ax.text(0.5, 0.5, "no data", transform=ax.transAxes,
@@ -247,19 +215,16 @@ def _draw_panel(ax,
 
     bin_edges = np.histogram_bin_edges(np.array(all_costs), bins=HIST_BINS)
 
-    # Exploration: wide hatched bars, behind.
     _draw_policy_bars(ax, expl_arrs,   bin_edges,
                       expl_col,   greedy_col, 0.90, ALPHA_EXPL,   zorder=2, hatch="///")
-    # Greedy: narrower solid bars, in front.
+
     _draw_policy_bars(ax, greedy_arrs, bin_edges,
                       greedy_col, "white",    0.55, ALPHA_GREEDY, zorder=3, hatch=None)
 
-    # Cost limit
+
     ax.axvline(bound, color=THRESHOLD_COLOR, linestyle=THRESHOLD_STYLE,
                linewidth=THRESHOLD_WIDTH, zorder=10)
 
-    # Metric annotations — floated above the axes, not inside the plot area.
-    # Stack (bottom→top): expl | greedy | algo title | d-header
     V_e, dp_e = _metrics(expl_arrs,   bound)
     V_g, dp_g = _metrics(greedy_arrs, bound)
     dp_sym = r"$D_{\mathrm{norm}}^+$"
@@ -271,21 +236,19 @@ def _draw_panel(ax,
     ax.text(0.03, 1.20, ann_g, transform=ax.transAxes, va="bottom",
             fontsize=fs, color=mcolors.to_hex(greedy_col), clip_on=False)
 
-    # Algo title: centred above metric annotations, on middle column only.
+
     if show_algo_title:
         ax.text(0.5, 1.42, algo_label, transform=ax.transAxes,
                 ha="center", va="bottom", color=mcolors.to_hex(greedy_col),
                 fontsize=LABEL_SIZE, fontweight="bold", clip_on=False)
 
-    # Column header: bound value (top row only).
-    # Always at y=1.58 so all three d=... labels sit at the same height,
-    # regardless of whether an algo title is present in this cell.
+
     if show_col_title:
         ax.text(0.5, 1.65, f"$d={bound:g}$", transform=ax.transAxes,
                 ha="center", va="bottom", fontsize=TITLE_SIZE - 6,
                 fontweight="bold", clip_on=False)
 
-    # Per-cell x range with natural ticks
+
     x_lo, x_hi = bin_edges[0], bin_edges[-1]
     ax.set_xlim(x_lo, x_hi)
     ticks = _natural_ticks(x_lo, x_hi, n_ticks=4)
@@ -296,22 +259,20 @@ def _draw_panel(ax,
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # Y-axis: label and ticks only on leftmost column
+
     if show_ylabel:
         ax.set_ylabel("Density", fontsize=LABEL_SIZE, labelpad=4)
     else:
         ax.tick_params(labelleft=False)
         ax.set_ylabel("")
 
-    # X-axis label only on bottom row; ticks always visible
+
     if show_xlabel:
         ax.set_xlabel("Cost", fontsize=LABEL_SIZE, labelpad=6)
     else:
         ax.set_xlabel("")
 
-# =============================================================================
-# Main
-# =============================================================================
+
 
 def plot_condition_hist(raw_csv: str,
                          env: str,
@@ -338,7 +299,7 @@ def plot_condition_hist(raw_csv: str,
     n_algos  = len(algo_list)
     n_bounds = len(bound_list)
 
-    # Collect episode cost arrays per (algo, bound).
+
     seed_data: dict = {}
     for algo in algo_list:
         for bound in bound_list:
@@ -351,12 +312,12 @@ def plot_condition_hist(raw_csv: str,
             seed_data[(algo, bound)] = (expl_arrs, greedy_arrs)
 
     fig_w = FIG_WIDTH * n_bounds
-    # Add 2.5 inches of headroom at the top for legend, suptitle, and above-axes annotations.
+
     fig_h = PANEL_H * n_algos + 2.5
     fig, axs = plt.subplots(n_algos, n_bounds,
                              figsize=(fig_w, fig_h),
                              squeeze=False)
-    # Keep the subplot area the same absolute height as before; extra goes to the top.
+
     subplot_frac = (PANEL_H * n_algos) / fig_h
     top_frac     = 0.06 + subplot_frac
     fig.subplots_adjust(hspace=1.2,
@@ -364,7 +325,7 @@ def plot_condition_hist(raw_csv: str,
                         top=top_frac, bottom=0.06,
                         wspace=0.35)
 
-    # Human-readable env name as figure suptitle
+
     from saferleval.common import TRANSLATIONS
     env_nice = TRANSLATIONS.get(env, env.replace("_", " ").title())
     fig.suptitle(env_nice, fontsize=TITLE_SIZE, y=1.03)
@@ -381,7 +342,7 @@ def plot_condition_hist(raw_csv: str,
                 show_algo_title= (j == n_bounds // 2),
             )
 
-    # Shared legend
+
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
     legend_items = [
@@ -402,9 +363,7 @@ def plot_condition_hist(raw_csv: str,
     plt.close(fig)
 
 
-# =============================================================================
-# CLI
-# =============================================================================
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(

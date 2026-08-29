@@ -12,9 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# =============================================================================
-# STYLE — mirrors plot_paper.py exactly
-# =============================================================================
+
 FONT_FAMILY  = "times new roman"
 FONT_SIZE    = 24
 LABEL_SIZE   = 22
@@ -48,7 +46,7 @@ ALGO_LABELS = {
 }
 
 ALGO_ORDER = ["ppo", "ppo_lag", "focops", "p3o"]
-# =============================================================================
+
 
 TRAIN_COST_KEYS = {"cost", "episodic/cost"}
 
@@ -228,10 +226,7 @@ def plot_agg_cdf_figure(raw_csv_path: str, out_path: str | Path,
                          x_min: float = -1.0,
                          x_max: float = 3.0,
                          n_bootstrap: int = 2000) -> None:
-    """Always plots up to three panels: Training | Stochastic test | Deterministic test.
 
-    Panels are only included when data is available for them.
-    """
     _apply_style()
     out_path = Path(out_path)
 

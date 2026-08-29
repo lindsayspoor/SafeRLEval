@@ -30,13 +30,13 @@ TRANSLATIONS = {
 
 _tab10 = cm.get_cmap("tab10").colors
 BASELINES_COLORS: Dict[str, tuple] = {
-    "ppo":      _tab10[7],   # grey
+    "ppo":      _tab10[7],   
     "ppo_cost": _tab10[1],
-    "ppo_lag":  _tab10[0],   # blue
+    "ppo_lag":  _tab10[0],   
     "ppo_pid":  _tab10[3],
     "ppo_saute":_tab10[4],
-    "p3o":      _tab10[5],   # purple
-    "focops":   _tab10[6],   # orange-red
+    "p3o":      _tab10[5],   
+    "focops":   _tab10[6],   
 }
 
 DEFAULT_METRIC_COLS: Dict[str, str] = {

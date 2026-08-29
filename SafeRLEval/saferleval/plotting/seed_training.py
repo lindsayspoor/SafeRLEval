@@ -1,28 +1,5 @@
 #!/usr/bin/env python3
 """Training curves for a given environment, averaged over seeds.
-
-One panel per safety bound, each showing the mean episodic cost (± std across
-seeds) over training steps for every algorithm.  Style mirrors plot_paper.py.
-
-Data sources (in priority order):
-  1. Wandb run history  — pass --project <name>
-  2. Local *_history.csv files — pass --data_dir <dir>
-
-Usage (wandb):
-    uv run python SafeRLEval/saferleval/plotting/seed_training.py \\
-        --project crax \\
-        --env safe_goal_point \\
-        --algos ppo ppo_lag p3o focops \\
-        --bounds 15 25 50 \\
-        --out figures/training_goal.pdf
-
-Usage (local CSV):
-    uv run python SafeRLEval/saferleval/plotting/seed_training.py \\
-        --data_dir experiments/data/raw \\
-        --env safe_goal_point \\
-        --algos ppo ppo_lag p3o focops \\
-        --bounds 15 25 50 \\
-        --out figures/training_goal.pdf
 """
 from __future__ import annotations
 
@@ -36,9 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# =============================================================================
-# STYLE — mirrors plot_paper.py exactly
-# =============================================================================
+
 FONT_FAMILY  = "times new roman"
 FONT_SIZE    = 24
 LABEL_SIZE   = 22
@@ -81,7 +56,7 @@ ALGO_DISPLAY_ORDER = ["ppo", "ppo_lag", "ppo_pid", "focops", "p3o",
 
 FIG_WIDTH = 4.5
 PANEL_H   = 3.0
-# =============================================================================
+
 
 
 def _apply_style() -> None:
@@ -109,9 +84,7 @@ def _moving_avg(x: np.ndarray, w: int) -> np.ndarray:
     return np.convolve(x_padded, np.ones(w) / w, mode="valid")[:len(x)]
 
 
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
+
 
 _DIR_PATTERN = re.compile(
     r"^(?P<env>.+)_Level_(?P<level>\d+)_(?P<algo>.+)_bound(?P<bound>[\d.]+)"
@@ -122,7 +95,6 @@ _DIR_PATTERN = re.compile(
 def _load_from_wandb(project: str, env: str, algos: list[str],
                      bounds: list[float], level: int = 1,
                      ) -> pd.DataFrame:
-    """Return DataFrame with columns [algo, bound, seed, step, value]."""
     import wandb
     api  = wandb.Api()
     rows = []
@@ -153,7 +125,6 @@ def _load_from_wandb(project: str, env: str, algos: list[str],
 
 def _load_from_csv(data_dir: str, env: str, algos: list[str],
                    bounds: list[float]) -> pd.DataFrame:
-    """Return DataFrame with columns [algo, bound, seed, step, value]."""
     rows = []
     for path in Path(data_dir).glob("*_history.csv"):
         stem = path.stem.replace("_history", "")
@@ -179,13 +150,11 @@ def _load_from_csv(data_dir: str, env: str, algos: list[str],
     return pd.DataFrame(rows)
 
 
-# ---------------------------------------------------------------------------
-# Drawing
-# ---------------------------------------------------------------------------
+
 
 def _draw_panel(ax, df: pd.DataFrame, bound: float,
                 smoothing: int, x_max: float | None) -> dict:
-    """Draw one panel (one bound). Returns legend handles dict."""
+
     handles = {}
     sorted_algos = sorted(
         df["algo"].unique(),
@@ -223,9 +192,7 @@ def _draw_panel(ax, df: pd.DataFrame, bound: float,
     return handles
 
 
-# ---------------------------------------------------------------------------
-# Main figure
-# ---------------------------------------------------------------------------
+
 
 def plot(env: str, algos: list[str], bounds: list[float], out_path: str,
          project: str = None, data_dir: str = None, level: int = 1,
@@ -234,7 +201,7 @@ def plot(env: str, algos: list[str], bounds: list[float], out_path: str,
 
     _apply_style()
 
-    # Load data
+
     df = pd.DataFrame()
     if project:
         print("Loading from wandb …")
@@ -269,7 +236,7 @@ def plot(env: str, algos: list[str], bounds: list[float], out_path: str,
     env_nice = env.replace("_", " ").title()
     fig.suptitle(env_nice, fontsize=TITLE_SIZE, y=1.02)
 
-    # Legend: algos first, threshold last
+
     order = ([a for a in ALGO_DISPLAY_ORDER if a in all_handles]
              + [k for k in all_handles if k not in ALGO_DISPLAY_ORDER])
     handles = [all_handles[k] for k in order if k in all_handles]
@@ -285,9 +252,6 @@ def plot(env: str, algos: list[str], bounds: list[float], out_path: str,
     print(f"Saved: {out}")
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,

@@ -11,7 +11,7 @@ This repository accompanies the paper and provides:
 - **Aggregate CDF visualisation** to show the full distribution.
 - **Per-condition histograms** of episodic cost distributions to reveal task- and bound-specific behavior hidden by aggregate metrics.
 
-The `SafeRLEval/` Python package can be installed standalone (`pip install -e SafeRLEval/`) and used independently of the experiments/ folder used for the purpose of reproducing our results.
+The `SafeRLEval/` Python package can be installed standalone (`pip install -e SafeRLEval/`) and used independently of the `experiments/` folder used for the purpose of reproducing our results.
 
 ---
 
@@ -48,20 +48,27 @@ uv run python experiments/train/train.py \
 # 2. Compute metrics
 uv run python SafeRLEval/evaluate.py experiments/data/raw/
 
-# 3. Plot training curves
+# 3. Run stochastic evaluation (per-episode costs for final policy with exploration noise)
+uv run python experiments/eval_stoch.py \
+    --runs_csv experiments/data/aggregate/runs.csv \
+    --models_dir models/models \
+    --envs safe_goal_point --algos ppo_lag --bounds 25
+
+# 4. Plot training curves
 uv run python experiments/plots/plot_training_curves.py \
     --data_dir experiments/data/raw/ \
     --envs safe_goal_point --algos ppo_lag --metrics reward cost
 
-# 4. Plot aggregate CDF
-uv run python SafeRLEval/saferleval/plots/cdf.py \
+# 5. Plot aggregate CDF
+uv run python SafeRLEval/saferleval/plotting/cdf.py \
     experiments/data/aggregate/runs.csv \
     --out figures/quicktest_cdf.pdf
 
-# 5. Plot per-condition histograms
-uv run python SafeRLEval/saferleval/plots/histograms.py \
+# 6. Plot per-condition histograms
+uv run python SafeRLEval/saferleval/plotting/hist.py \
     experiments/data/aggregate/runs.csv \
-    --out figures/quicktest_hist.pdf --metric test_cost
+    --env safe_goal_point --bounds 25 --algos ppo_lag \
+    --out figures/quicktest_hist.pdf
 ```
 
 
@@ -71,7 +78,7 @@ uv run python SafeRLEval/saferleval/plots/histograms.py \
 
 ### 1. Train
 
-Each run trains one seed of one algorithm on one environment with one cost limit.
+Each run trains one seed of one algorithm on one environment with one safety bound.
 
 Per-environment configs with the paper hyperparameters are in `experiments/train/configs/`.
 Pass one with `--config` and override individual values on the command line as needed:
@@ -146,7 +153,24 @@ uv run python SafeRLEval/evaluate.py \
 Both modes print per-condition and aggregate metric tables to the terminal output and write
 output CSVs to `experiments/data/aggregate/` (override with `--output_data_dir`).
 
-### 3. Plot
+### 3. Stochastic evaluation
+
+`evaluate.py` populates the greedy (deterministic) test metrics. To also populate
+per-episode costs for the final policy **with exploration noise**, run `eval_stoch.py`:
+
+```bash
+uv run python experiments/eval_stoch.py \
+    --runs_csv experiments/data/aggregate/runs.csv \
+    --models_dir models/models \
+    --envs safe_goal_point safe_circle_point safe_push_point safe_button_point \
+    --algos ppo ppo_lag focops p3o \
+    --bounds 15 25 50
+```
+
+This writes `test_episode_costs` back into `runs.csv` and is required before plotting
+the exploration-noise panels of the CDF and per-condition histograms.
+
+### 4. Plot
 
 **Training curves (local)**:
 
@@ -171,21 +195,21 @@ uv run python experiments/plots/plot_training_curves.py \
 **Aggregate CDF**:
 
 ```bash
-uv run python SafeRLEval/saferleval/plots/cdf.py \
+uv run python SafeRLEval/saferleval/plotting/cdf.py \
     experiments/data/aggregate/runs.csv \
     --out figures/agg_cdf.pdf \
     --algos ppo ppo_lag focops p3o \
     --x_min -1.0 --x_max 3.0
 ```
 
-**Per-condition histograms**:
+**Individual task and safety bounds histograms**:
 
 ```bash
-uv run python SafeRLEval/saferleval/plots/histograms.py \
+uv run python SafeRLEval/saferleval/plotting/hist.py \
     experiments/data/aggregate/runs.csv \
-    --out figures/hist_test_cost.pdf \
-    --metric test_cost \
-    --algos ppo ppo_lag focops p3o
+    --env safe_goal_point --bounds 15 25 50 \
+    --algos ppo ppo_lag focops p3o \
+    --out figures/hist_goal.pdf
 ```
 
 ---
