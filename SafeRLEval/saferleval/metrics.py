@@ -112,9 +112,26 @@ def std_over_seeds(rows: List[dict], field: str) -> Optional[float]:
 
 
 
+def _d_plus_for_split(cell: dict, split: str, bound: float,
+                       ep_key: str, means: dict, stds: dict):
+    """Compute (D+_norm, D+_norm_std) for one split using per-episode costs when available."""
+    ep = cell.get(ep_key)
+    if ep:
+        return (compute_d_plus_norm_from_episodes(ep, bound),
+                compute_d_plus_norm_std_from_episodes(ep, bound))
+    cmv = means.get(f"{split}_cost_mean_violating")
+    vr  = means.get(f"{split}_violation_rate")
+    cmv_std = stds.get(f"{split}_cost_mean_violating")
+    d_plus = compute_d_plus_norm(cmv, vr, bound)
+    d_plus_std = (cmv_std / bound if cmv_std is not None and abs(bound) > 1e-10 else None)
+    return d_plus, d_plus_std
+
+
 def compute_new_metrics(per_algo_cells: Dict[str, List[dict]],
                          algos: List[str]) -> Dict[str, List[dict]]:
-    """Compute bar{R}, bar{C}, V, D_norm, D+_norm per (algo, task, bound)"""
+    """Compute r̄, c̄, V, D_norm, D+_norm per (algo, task, bound) for all three splits:
+    train (exploration) / final policy (exploration) / final policy (greedy).
+    """
     result: Dict[str, List[dict]] = {}
     for algo in algos:
         algo_rows = []
@@ -129,47 +146,54 @@ def compute_new_metrics(per_algo_cells: Dict[str, List[dict]],
             def gs(split, name):
                 return stds.get(f"{split}_{name}")
 
-            ep_per_seed = cell.get("episode_costs_per_seed")
-            if ep_per_seed:
-                d_plus_test  = compute_d_plus_norm_from_episodes(ep_per_seed, bound)
-                d_plus_test_std = compute_d_plus_norm_std_from_episodes(ep_per_seed, bound)
-            else:
-                d_plus_test = compute_d_plus_norm(
-                    g("test", "cost_mean_violating"), g("test", "violation_rate"), bound)
-                cmv_std = gs("test", "cost_mean_violating")
-                d_plus_test_std = (cmv_std / bound
-                                   if cmv_std is not None and abs(bound) > 1e-10 else None)
+            def _cost_std_norm(split):
+                s = gs(split, "cost")
+                return s / bound if s is not None and abs(bound) > 1e-10 else None
 
-            cmv_tr_std  = gs("train", "cost_mean_violating")
-            tr_cost_std = gs("train", "cost")
-            te_cost_std = gs("test",  "cost")
+            d_plus_test, d_plus_test_std = _d_plus_for_split(
+                cell, "test", bound, "test_episode_costs_per_seed", means, stds)
+            d_plus_det, d_plus_det_std = _d_plus_for_split(
+                cell, "det_test", bound, "episode_costs_per_seed", means, stds)
+            d_plus_tr_std = gs("train", "cost_mean_violating")
+            d_plus_tr_std = (d_plus_tr_std / bound
+                             if d_plus_tr_std is not None and abs(bound) > 1e-10 else None)
 
             algo_rows.append({
                 "env": env, "bound": bound,
-                "r_bar_train": g("train", "reward"),
-                "r_bar_test": g("test",  "reward"),
-                "c_bar_train": g("train", "cost"),
-                "c_bar_test": g("test",  "cost"),
-                "V_train": g("train", "violation_rate"),
-                "V_test": g("test",  "violation_rate"),
-                "D_norm_train": compute_dnorm(g("train", "cost"), bound),
-                "D_norm_test":  compute_dnorm(g("test",  "cost"), bound),
-                "D_plus_norm_train": compute_d_plus_norm(
+                # Training
+                "R_bar_train":               g("train", "reward"),
+                "C_bar_train":               g("train", "cost"),
+                "V_train":                   g("train", "violation_rate"),
+                "D_norm_train":              compute_dnorm(g("train", "cost"), bound),
+                "D_plus_norm_train":         compute_d_plus_norm(
                     g("train", "cost_mean_violating"), g("train", "violation_rate"), bound),
-                "D_plus_norm_test": d_plus_test,
-                "r_bar_train_std": gs("train", "reward"),
-                "r_bar_test_std": gs("test",  "reward"),
-                "c_bar_train_std": gs("train", "cost"),
-                "c_bar_test_std":  gs("test",  "cost"),
-                "V_train_std": gs("train", "violation_rate"),
-                "V_test_std": gs("test",  "violation_rate"),
-                "D_norm_train_std": (tr_cost_std / bound
-                                          if tr_cost_std is not None and abs(bound) > 1e-10 else None),
-                "D_norm_test_std": (te_cost_std / bound
-                                          if te_cost_std is not None and abs(bound) > 1e-10 else None),
-                "D_plus_norm_train_std": (cmv_tr_std / bound
-                                          if cmv_tr_std is not None and abs(bound) > 1e-10 else None),
-                "D_plus_norm_test_std":  d_plus_test_std,
+                "R_bar_train_std":           gs("train", "reward"),
+                "C_bar_train_std":           gs("train", "cost"),
+                "V_train_std":               gs("train", "violation_rate"),
+                "D_norm_train_std":          _cost_std_norm("train"),
+                "D_plus_norm_train_std":     d_plus_tr_std,
+                # Stochastic test
+                "R_bar_final_expl":                g("test", "reward"),
+                "C_bar_final_expl":                g("test", "cost"),
+                "V_final_expl":                    g("test", "violation_rate"),
+                "D_norm_final_expl":               compute_dnorm(g("test", "cost"), bound),
+                "D_plus_norm_final_expl":          d_plus_test,
+                "R_bar_final_expl_std":            gs("test", "reward"),
+                "C_bar_final_expl_std":            gs("test", "cost"),
+                "V_final_expl_std":                gs("test", "violation_rate"),
+                "D_norm_final_expl_std":           _cost_std_norm("test"),
+                "D_plus_norm_final_expl_std":      d_plus_test_std,
+                # Deterministic test
+                "R_bar_final_greedy":            g("det_test", "reward"),
+                "C_bar_final_greedy":            g("det_test", "cost"),
+                "V_final_greedy":                g("det_test", "violation_rate"),
+                "D_norm_final_greedy":           compute_dnorm(g("det_test", "cost"), bound),
+                "D_plus_norm_final_greedy":      d_plus_det,
+                "R_bar_final_greedy_std":        gs("det_test", "reward"),
+                "C_bar_final_greedy_std":        gs("det_test", "cost"),
+                "V_final_greedy_std":            gs("det_test", "violation_rate"),
+                "D_norm_final_greedy_std":       _cost_std_norm("det_test"),
+                "D_plus_norm_final_greedy_std":  d_plus_det_std,
             })
         result[algo] = algo_rows
     return result
@@ -177,18 +201,22 @@ def compute_new_metrics(per_algo_cells: Dict[str, List[dict]],
 
 def compute_aggregate_new_metrics(new_metrics: Dict[str, List[dict]],
                                    algos: List[str]) -> Dict[str, dict]:
-    """Mean and IQM of V, D_norm, D+_norm across all (task, bound) cells per algorithm"""
+    """Mean and IQM of V, D_norm, D+_norm across all (task, bound) cells per algorithm."""
     result: Dict[str, dict] = {}
-    keys = ("r_bar_train", "r_bar_test",
-            "V_train", "V_test", "D_norm_train", "D_norm_test",
-            "D_plus_norm_train", "D_plus_norm_test")
+    keys = (
+        "R_bar_train",       "R_bar_final_expl",       "R_bar_final_greedy",
+        "C_bar_train",       "C_bar_final_expl",       "C_bar_final_greedy",
+        "V_train",           "V_final_expl",            "V_final_greedy",
+        "D_norm_train",      "D_norm_final_expl",       "D_norm_final_greedy",
+        "D_plus_norm_train", "D_plus_norm_final_expl",  "D_plus_norm_final_greedy",
+    )
     for algo in algos:
         cells = new_metrics.get(algo, [])
         r: dict = {}
         for k in keys:
             vals = [c[k] for c in cells if c.get(k) is not None and not np.isnan(c[k])]
             r[f"{k}_mean"] = float(np.mean(vals)) if vals else None
-            r[f"{k}_iqm"] = compute_iqm(vals)
+            r[f"{k}_iqm"]  = compute_iqm(vals)
         result[algo] = r
     return result
 
@@ -216,12 +244,19 @@ def _per_seed_derived(cache_rows: List[dict]) -> dict:
             except (TypeError, ValueError):
                 pass
 
-        _add("r_bar_train", row.get("train_reward"))
-        _add("r_bar_test", row.get("test_reward"))
-        _add("V_train", row.get("train_violation_rate"))
-        _add("V_test", row.get("test_violation_rate"))
+        _add("R_bar_train",       row.get("train_reward"))
+        _add("R_bar_final_expl",  row.get("test_reward"))
+        _add("R_bar_final_greedy",row.get("det_test_reward"))
+        _add("C_bar_train",       row.get("train_cost"))
+        _add("C_bar_final_expl",  row.get("test_cost"))
+        _add("C_bar_final_greedy",row.get("det_test_cost"))
+        _add("V_train",           row.get("train_violation_rate"))
+        _add("V_final_expl",         row.get("test_violation_rate"))
+        _add("V_final_greedy",     row.get("det_test_violation_rate"))
 
-        for split, col in [("train", "train_cost"), ("test", "test_cost")]:
+        for split, col in [("train",    "train_cost"),
+                           ("final_expl",     "test_cost"),
+                           ("final_greedy", "det_test_cost")]:
             try:
                 v = float(row.get(col))
                 if not np.isnan(v) and abs(bound) > 1e-10:
@@ -230,7 +265,7 @@ def _per_seed_derived(cache_rows: List[dict]) -> dict:
                 pass
 
         cmv_tr = row.get("train_cost_mean_violating")
-        vr_tr= row.get("train_violation_rate")
+        vr_tr  = row.get("train_violation_rate")
         try:
             vr_f = float(vr_tr)
             if not np.isnan(vr_f):
@@ -242,17 +277,41 @@ def _per_seed_derived(cache_rows: List[dict]) -> dict:
         except (TypeError, ValueError):
             pass
 
-        raw = row.get("det_test_episode_costs")
-        if raw is not None and not (isinstance(raw, float) and np.isnan(raw)):
-            try:
-                ep = json.loads(raw) if isinstance(raw, str) else raw
-                arr= np.array(ep, dtype=float)
-                viol = arr[arr > bound]
-                if len(viol) > 0:
-                    groups[key]["D_plus_norm_test"].append(
-                        (float(np.mean(viol)) - bound) / bound)
-            except (ValueError, TypeError, json.JSONDecodeError):
-                pass
+        for ep_col, metric_key, vr_col, cmv_col in [
+            ("det_test_episode_costs", "D_plus_norm_final_greedy",
+             "det_test_violation_rate", "det_test_cost_mean_violating"),
+            ("test_episode_costs",     "D_plus_norm_final_expl",
+             "test_violation_rate",    "test_cost_mean_violating"),
+        ]:
+            raw = row.get(ep_col)
+            added = False
+            if raw is not None and not (isinstance(raw, float) and np.isnan(raw)):
+                try:
+                    ep   = json.loads(raw) if isinstance(raw, str) else raw
+                    arr  = np.array(ep, dtype=float)
+                    viol = arr[arr > bound]
+                    if len(viol) > 0:
+                        groups[key][metric_key].append(
+                            (float(np.mean(viol)) - bound) / bound)
+                    else:
+                        groups[key][metric_key].append(0.0)
+                    added = True
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    pass
+            if not added:
+                # Fallback: use aggregate stats so bootstrap CI can still be computed.
+                vr_val  = row.get(vr_col)
+                cmv_val = row.get(cmv_col)
+                try:
+                    vr_f = float(vr_val)
+                    if not np.isnan(vr_f):
+                        if vr_f <= 0:
+                            groups[key][metric_key].append(0.0)
+                        elif cmv_val is not None and abs(bound) > 1e-10:
+                            groups[key][metric_key].append(
+                                max(0.0, float(cmv_val) - bound) / bound)
+                except (TypeError, ValueError):
+                    pass
 
     return dict(groups)
 
@@ -263,10 +322,11 @@ def compute_iqm_bootstrap_ci(cache_rows: List[dict], algos: List[str],
     """Stratified bootstrap 95% CI for the IQM of each aggregate metric"""
     per_seed    = _per_seed_derived(cache_rows)
     metric_keys = [
-        "r_bar_train", "r_bar_test",
-        "V_train", "V_test",
-        "D_norm_train","D_norm_test",
-        "D_plus_norm_train", "D_plus_norm_test",
+        "R_bar_train",       "R_bar_final_expl",       "R_bar_final_greedy",
+        "C_bar_train",       "C_bar_final_expl",       "C_bar_final_greedy",
+        "V_train",           "V_final_expl",            "V_final_greedy",
+        "D_norm_train",      "D_norm_final_expl",       "D_norm_final_greedy",
+        "D_plus_norm_train", "D_plus_norm_final_expl",  "D_plus_norm_final_greedy",
     ]
     rng    = np.random.default_rng(42)
     result: Dict[str, dict] = {}
@@ -307,8 +367,23 @@ def compute_iqm_bootstrap_ci(cache_rows: List[dict], algos: List[str],
     return result
 
 
-def print_per_cell_new_metrics(new_metrics: Dict[str, List[dict]], algos: List[str]) -> None:
-    """Print per (task, bound) table: bar{R}, bar{C}, V, D_norm, D+_norm for each algorithm"""
+_SPLIT_DISPLAY = {"train": "training", "final_expl": "final policy (exploration)", "final_greedy": "final policy (greedy)"}
+
+
+def _split_of_key(key: str) -> Optional[str]:
+    """Return which evaluation split a metric key belongs to."""
+    for s in ("final_greedy", "final_expl", "train"):  # longest first so 'test' doesn't match 'det_test'
+        if key.endswith(f"_{s}"):
+            return s
+    return None
+
+
+def print_per_cell_new_metrics(new_metrics: Dict[str, List[dict]], algos: List[str],
+                                splits: Optional[List[str]] = None) -> None:
+    """Print per (task, bound) table: bar{R}, bar{C}, V, D_norm, D+_norm for each algorithm.
+
+    splits: subset of ["train","final_expl","final_greedy"] to show; None = all three.
+    """
     keys_seen: List = []
     keys_set: set = set()
     for algo in algos:
@@ -324,17 +399,24 @@ def print_per_cell_new_metrics(new_metrics: Dict[str, List[dict]], algos: List[s
         for c in new_metrics.get(algo, []):
             lookup[(algo, c["env"], c["bound"])] = c
 
-    col_headers = [
-        ("bar{R}_train", "r_bar_train"),("bar{C}_train", "c_bar_train"),
-        ("V_train", "V_train"), ("Dnorm_train",   "D_norm_train"), ("D+norm_train", "D_plus_norm_train"),
-        ("bar{R}_test",  "r_bar_test"), ("bar{C}_test",  "c_bar_test"),
-        ("V_test", "V_test"), ("Dnorm_test",   "D_norm_test"), ("D+norm_test", "D_plus_norm_test"),
+    all_col_headers = [
+        ("bar{R}_tr",  "R_bar_train"),    ("bar{C}_tr",  "C_bar_train"),
+        ("V_tr",   "V_train"),         ("Dnorm_tr",   "D_norm_train"),    ("Dnorm+_tr",  "D_plus_norm_train"),
+        ("bar{R}_final_expl",  "R_bar_final_expl"),     ("bar{C}_final_expl",  "C_bar_final_expl"),
+        ("V_final_expl",   "V_final_expl"),          ("Dnorm_final_expl",   "D_norm_final_expl"),     ("Dnorm+_final_expl",  "D_plus_norm_final_expl"),
+        ("bar{R}_final_greedy",  "R_bar_final_greedy"), ("bar{C}_final_greedy",  "C_bar_final_greedy"),
+        ("V_final_greedy",   "V_final_greedy"),      ("Dnorm_final_greedy",   "D_norm_final_greedy"), ("Dnorm+_final_greedy",  "D_plus_norm_final_greedy"),
     ]
+    col_headers = ([(lbl, key) for lbl, key in all_col_headers if _split_of_key(key) in splits]
+                   if splits else all_col_headers)
+
+    split_labels = "  ".join(_SPLIT_DISPLAY.get(s, s) for s in (splits or ["train", "final_expl", "final_greedy"]))
     col_w = 9
     row_w = max(20, max((len(TRANSLATIONS.get(a, a)) for a in algos), default=10) + 2)
+    total_w = max(100, row_w + col_w * len(col_headers) + 4)
 
-    print("\n" + "=" * 100)
-    print("PER-CONDITION METRICS")
+    print("\n" + "=" * total_w)
+    print(f"PER-CONDITION METRICS  [{split_labels}]  (± = std over seeds)")
 
     for env, bound in keys_seen:
         print(f"\n  env={env}, bound={bound:g}")
@@ -361,25 +443,44 @@ def print_per_cell_new_metrics(new_metrics: Dict[str, List[dict]], algos: List[s
     print()
 
 
-def print_aggregate_new_metrics(agg: Dict[str, dict], algos: List[str]) -> None:
-    """Print aggregate mean and IQM of V, D_norm, D+_norm across all tasks x bounds"""
-    metric_groups = [
-        ("bar{R}_train","r_bar_train_mean","r_bar_train_iqm"),
-        ("bar{R}_test", "r_bar_test_mean", "r_bar_test_iqm"),
-        ("V_train",  "V_train_mean",  "V_train_iqm"),
-        ("V_test", "V_test_mean",  "V_test_iqm"),
-        ("D_norm_train", "D_norm_train_mean", "D_norm_train_iqm"),
-        ("D_norm_test","D_norm_test_mean",  "D_norm_test_iqm"),
-        ("D+_norm_train", "D_plus_norm_train_mean","D_plus_norm_train_iqm"),
-        ("D+_norm_test", "D_plus_norm_test_mean", "D_plus_norm_test_iqm"),
+def print_aggregate_new_metrics(agg: Dict[str, dict], algos: List[str],
+                                 splits: Optional[List[str]] = None) -> None:
+    """Print aggregate mean and IQM of V, D_norm, D+_norm across all tasks x bounds.
+
+    splits: subset of ["train","test","det_test"] to show; None = all three.
+    """
+    all_metric_groups = [
+        ("R̄_tr",    "R_bar_train_mean",              "R_bar_train_iqm"),
+        ("R̄_fe",    "R_bar_final_expl_mean",         "R_bar_final_expl_iqm"),
+        ("R̄_fg",    "R_bar_final_greedy_mean",       "R_bar_final_greedy_iqm"),
+        ("C̄_tr",    "C_bar_train_mean",              "C_bar_train_iqm"),
+        ("C̄_fe",    "C_bar_final_expl_mean",         "C_bar_final_expl_iqm"),
+        ("C̄_fg",    "C_bar_final_greedy_mean",       "C_bar_final_greedy_iqm"),
+        ("V_tr",     "V_train_mean",                  "V_train_iqm"),
+        ("V_fe",     "V_final_expl_mean",             "V_final_expl_iqm"),
+        ("V_fg",     "V_final_greedy_mean",           "V_final_greedy_iqm"),
+        ("Dn_tr",    "D_norm_train_mean",             "D_norm_train_iqm"),
+        ("Dn_fe",    "D_norm_final_expl_mean",        "D_norm_final_expl_iqm"),
+        ("Dn_fg",    "D_norm_final_greedy_mean",      "D_norm_final_greedy_iqm"),
+        ("Dn+_tr",   "D_plus_norm_train_mean",        "D_plus_norm_train_iqm"),
+        ("Dn+_fe",   "D_plus_norm_final_expl_mean",   "D_plus_norm_final_expl_iqm"),
+        ("Dn+_fg",   "D_plus_norm_final_greedy_mean", "D_plus_norm_final_greedy_iqm"),
     ]
+    metric_groups = (
+        [(n, mk, ik) for n, mk, ik in all_metric_groups
+         if _split_of_key(mk.removesuffix("_mean").removesuffix("_iqm")) in splits]
+        if splits else all_metric_groups
+    )
+
+    split_labels = "  ".join(_SPLIT_DISPLAY.get(s, s) for s in (splits or ["train", "final_expl", "final_greedy"]))
     col_w = 10
     row_w = max(20, max((len(TRANSLATIONS.get(a, a)) for a in algos), default=10) + 2)
-
-    print("\n" + "=" * 100)
-    print("AGGREGATE METRICS (mean + IQM across all tasks and bounds)")
-
     header_w = col_w * 2 + 1
+    total_w = max(100, row_w + (header_w + 1) * len(metric_groups))
+
+    print("\n" + "=" * total_w)
+    print(f"AGGREGATE METRICS  (mean + IQM across all tasks × bounds)  [{split_labels}]")
+
     print(f"{'Algorithm':<{row_w}}", end="")
     for name, _, _ in metric_groups:
         print(f"{name:^{header_w}} ", end="")
@@ -405,27 +506,46 @@ def print_aggregate_new_metrics(agg: Dict[str, dict], algos: List[str]) -> None:
 
 
 def print_iqm_bootstrap_table(agg: Dict[str, dict], ci: Dict[str, dict],
-                                algos: List[str]) -> None:
-    metric_groups = [
-        ("bar{R}_train", "r_bar_train"),
-        ("bar{R}_test", "r_bar_test"),
-        ("V_train", "V_train"),
-        ("V_test", "V_test"),
-        ("D_train","D_norm_train"),
-        ("D_test", "D_norm_test"),
-        ("D+_train", "D_plus_norm_train"),
-        ("D+_test", "D_plus_norm_test"),
+                               algos: List[str],
+                               splits: Optional[List[str]] = None) -> None:
+    """Print IQM with 95% bootstrap CI table.
+
+    splits: subset of ["train","test","det_test"] to show; None = all three.
+    """
+    all_metric_groups = [
+        ("R̄_tr",   "R_bar_train"),
+        ("R̄_fe",   "R_bar_final_expl"),
+        ("R̄_fg",   "R_bar_final_greedy"),
+        ("C̄_tr",   "C_bar_train"),
+        ("C̄_fe",   "C_bar_final_expl"),
+        ("C̄_fg",   "C_bar_final_greedy"),
+        ("V_tr",    "V_train"),
+        ("V_fe",    "V_final_expl"),
+        ("V_fg",    "V_final_greedy"),
+        ("Dn_tr",   "D_norm_train"),
+        ("Dn_fe",   "D_norm_final_expl"),
+        ("Dn_fg",   "D_norm_final_greedy"),
+        ("Dn+_tr",  "D_plus_norm_train"),
+        ("Dn+_fe",  "D_plus_norm_final_expl"),
+        ("Dn+_fg",  "D_plus_norm_final_greedy"),
     ]
+    metric_groups = (
+        [(n, base) for n, base in all_metric_groups if _split_of_key(base) in splits]
+        if splits else all_metric_groups
+    )
+
+    split_labels = "  ".join(_SPLIT_DISPLAY.get(s, s) for s in (splits or ["train", "final_expl", "final_greedy"]))
     col_w = 24
     row_w = max(20, max((len(TRANSLATIONS.get(a, a)) for a in algos), default=10) + 2)
+    total_w = max(80, row_w + col_w * len(metric_groups))
 
-    print("\n" + "=" * (row_w + col_w * len(metric_groups)))
-    print("IQM WITH 95% BOOTSTRAP CI")
+    print("\n" + "=" * total_w)
+    print(f"IQM WITH 95% BOOTSTRAP CI  (B=2000, stratified by condition)  [{split_labels}]")
     print(f"{'Algorithm':<{row_w}}", end="")
     for name, _ in metric_groups:
         print(f"{name:^{col_w}}", end="")
     print()
-    print("-" * (row_w + col_w * len(metric_groups)))
+    print("-" * total_w)
 
     for algo in algos:
         r = agg.get(algo, {})
@@ -433,9 +553,9 @@ def print_iqm_bootstrap_table(agg: Dict[str, dict], ci: Dict[str, dict],
         label = TRANSLATIONS.get(algo, algo)
         print(f"{label:<{row_w}}", end="")
         for _, base in metric_groups:
-            iqm = r.get(f"{base}_iqm")
-            lower= c.get(f"{base}_iqm_ci_lower")
-            upper= c.get(f"{base}_iqm_ci_upper")
+            iqm   = r.get(f"{base}_iqm")
+            lower = c.get(f"{base}_iqm_ci_lower")
+            upper = c.get(f"{base}_iqm_ci_upper")
             if iqm is not None and lower is not None and upper is not None:
                 cell = f"{iqm:.3f} [{lower:.3f},{upper:.3f}]"
             elif iqm is not None:
@@ -537,8 +657,9 @@ def _fetch_test_summary(run, keys: List[str]) -> Dict[str, float]:
 
 
 _ALL_CELL_COLS = [
-    "train_reward", "train_cost", "train_violation_rate", "train_cost_mean_violating",
-    "test_reward", "test_cost", "test_violation_rate", "test_cost_mean_violating",
+    "train_reward",    "train_cost",    "train_violation_rate",    "train_cost_mean_violating",
+    "test_reward",     "test_cost",     "test_violation_rate",     "test_cost_mean_violating",
+    "det_test_reward", "det_test_cost", "det_test_violation_rate", "det_test_cost_mean_violating",
 ]
 
 
@@ -555,8 +676,10 @@ def _collect_seed_rows(api, project: str, env: str, algo: str, bound: float,
     runs = api.runs(project, filters=f, order="-created_at", per_page=200)
 
     window_keys = [_TRAIN_KEYS["violation_rate"], _TRAIN_KEYS["cost_mean_violating"]]
-    full_keys= [_TRAIN_KEYS["reward"], _TRAIN_KEYS["cost"]]
-    test_map = _DET_TEST_KEYS if deterministic_test else _TEST_KEYS
+    full_keys   = [_TRAIN_KEYS["reward"], _TRAIN_KEYS["cost"]]
+    # Always fetch both stochastic (test/) and deterministic (det_test/) summaries.
+    stoch_keys = list(_TEST_KEYS.values())
+    det_keys   = list(_DET_TEST_KEYS.values())
 
     seen_seeds, rows = set(), []
     for run in runs:
@@ -568,25 +691,30 @@ def _collect_seed_rows(api, project: str, env: str, algo: str, bound: float,
         seen_seeds.add(seed)
 
         train_window = _fetch_train_window_avg(run, window_keys, samples, window_frac)
-        train_full = _fetch_train_full_avg(run, full_keys, samples)
-        test_vals = _fetch_test_summary(run, list(test_map.values()))
+        train_full   = _fetch_train_full_avg(run, full_keys, samples)
+        stoch_vals   = _fetch_test_summary(run, stoch_keys)
+        det_vals     = _fetch_test_summary(run, det_keys)
 
         row: dict = {"seed": seed}
-        for metric, key in [("violation_rate", _TRAIN_KEYS["violation_rate"]),
+        for metric, key in [("violation_rate",      _TRAIN_KEYS["violation_rate"]),
                              ("cost_mean_violating", _TRAIN_KEYS["cost_mean_violating"])]:
             row[f"train_{metric}"] = train_window.get(key)
         for metric, key in [("reward", _TRAIN_KEYS["reward"]),
                              ("cost",   _TRAIN_KEYS["cost"])]:
             row[f"train_{metric}"] = train_full.get(key)
-        for metric, key in test_map.items():
-            row[f"test_{metric}"] = test_vals.get(key)
+        for metric, key in _TEST_KEYS.items():
+            row[f"test_{metric}"] = stoch_vals.get(key)
+        for metric, key in _DET_TEST_KEYS.items():
+            row[f"det_test_{metric}"] = det_vals.get(key)
 
-        ep_costs_raw = run.summary.get("det_test/episode_costs")
-        row["det_test_episode_costs"] = (
-            json.dumps(ep_costs_raw) if isinstance(ep_costs_raw, list)
-            else str(ep_costs_raw) if ep_costs_raw is not None
-            else None
-        )
+        for wandb_key, csv_col in [("det_test/episode_costs", "det_test_episode_costs"),
+                                    ("test/episode_costs",     "test_episode_costs")]:
+            raw = run.summary.get(wandb_key)
+            row[csv_col] = (
+                json.dumps(raw) if isinstance(raw, list)
+                else str(raw)   if raw is not None
+                else None
+            )
         rows.append(row)
     return rows
 

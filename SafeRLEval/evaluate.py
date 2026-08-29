@@ -26,12 +26,13 @@ from saferleval.metrics import (
 )
 
 _NEEDED_COLS = [
-    "train_reward", "test_reward",
-    "train_cost","test_cost",
-    "train_violation_rate","test_violation_rate",
-    "train_cost_mean_violating", "test_cost_mean_violating",
+    "train_reward",              "train_cost",
+    "train_violation_rate",      "train_cost_mean_violating",
+    "test_reward",               "test_cost",
+    "test_violation_rate",       "test_cost_mean_violating",
+    "det_test_reward",           "det_test_cost",
+    "det_test_violation_rate",   "det_test_cost_mean_violating",
 ]
-_EP_COSTS_COL = "det_test_episode_costs"
 
 
 
@@ -47,8 +48,7 @@ def _load_df(source: str) -> pd.DataFrame:
 
 
 def _build_per_point(df: pd.DataFrame, args: argparse.Namespace) -> Dict[str, List[dict]]:
-    available    = [c for c in _NEEDED_COLS if c in df.columns]
-    has_ep_costs = _EP_COSTS_COL in df.columns
+    available = [c for c in _NEEDED_COLS if c in df.columns]
     per_point: Dict[str, List[dict]] = {algo: [] for algo in args.algos}
 
     for algo in args.algos:
@@ -69,10 +69,13 @@ def _build_per_point(df: pd.DataFrame, args: argparse.Namespace) -> Dict[str, Li
                     "stds":{c: std_over_seeds(rows, c) for c in available},
                 }
 
-                if has_ep_costs:
+                for col, cell_key in [("det_test_episode_costs", "episode_costs_per_seed"),
+                                      ("test_episode_costs",     "test_episode_costs_per_seed")]:
+                    if col not in df.columns:
+                        continue
                     ep_arrs = []
                     for r in rows:
-                        raw = r.get(_EP_COSTS_COL)
+                        raw = r.get(col)
                         if raw is None:
                             continue
                         try:
@@ -81,12 +84,24 @@ def _build_per_point(df: pd.DataFrame, args: argparse.Namespace) -> Dict[str, Li
                         except (json.JSONDecodeError, TypeError, ValueError):
                             pass
                     if ep_arrs:
-                        point["episode_costs_per_seed"] = ep_arrs
+                        point[cell_key] = ep_arrs
 
                 per_point[algo].append(point)
 
     return per_point
 
+
+
+def _print_tables(new_metrics, agg_metrics, iqm_ci, algos) -> None:
+    """Print two table sets: (1) training + det_test, (2) stochastic test + det_test."""
+    for splits, heading in [
+        (["train",       "final_greedy"], "TABLE SET 1: TRAINING  &  FINAL POLICY (GREEDY)"),
+        (["final_expl",  "final_greedy"], "TABLE SET 2: FINAL POLICY (EXPLORATION)  &  FINAL POLICY (GREEDY)"),
+    ]:
+        print(f"\n{'#' * 80}\n# {heading}\n{'#' * 80}")
+        print_per_cell_new_metrics(new_metrics, algos, splits=splits)
+        print_aggregate_new_metrics(agg_metrics, algos, splits=splits)
+        print_iqm_bootstrap_table(agg_metrics, iqm_ci, algos, splits=splits)
 
 
 def _run_local(args: argparse.Namespace) -> None:
@@ -108,12 +123,9 @@ def _run_local(args: argparse.Namespace) -> None:
     per_point = _build_per_point(df, args)
     new_metrics = compute_new_metrics(per_point, args.algos)
     agg_metrics = compute_aggregate_new_metrics(new_metrics, args.algos)
-    print_per_cell_new_metrics(new_metrics, args.algos)
-    print_aggregate_new_metrics(agg_metrics, args.algos)
-
     cache_rows = df.to_dict("records")
     iqm_ci = compute_iqm_bootstrap_ci(cache_rows, args.algos)
-    print_iqm_bootstrap_table(agg_metrics, iqm_ci, args.algos)
+    _print_tables(new_metrics, agg_metrics, iqm_ci, args.algos)
     save_data(cache_rows, new_metrics, agg_metrics, args, iqm_ci=iqm_ci)
 
 
@@ -122,10 +134,8 @@ def _run_wandb(args: argparse.Namespace) -> None:
     per_algo_cells, cache_rows = build_summary(api, args)
     new_metrics = compute_new_metrics(per_algo_cells, args.algos)
     agg_metrics = compute_aggregate_new_metrics(new_metrics, args.algos)
-    print_per_cell_new_metrics(new_metrics, args.algos)
-    print_aggregate_new_metrics(agg_metrics, args.algos)
     iqm_ci = compute_iqm_bootstrap_ci(cache_rows, args.algos)
-    print_iqm_bootstrap_table(agg_metrics, iqm_ci, args.algos)
+    _print_tables(new_metrics, agg_metrics, iqm_ci, args.algos)
     save_data(cache_rows, new_metrics, agg_metrics, args, iqm_ci=iqm_ci)
 
 

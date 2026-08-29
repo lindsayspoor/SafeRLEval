@@ -136,34 +136,49 @@ class _LocalWriter:
         print(f"Training history saved: {path}")
         return path
 
-    def save_summary(self, train_final: dict, det_summary: dict) -> Path:
-        """Write a one-row CSV."""
+    def save_summary(self, train_final: dict, det_summary: dict,
+                     stoch_ep_summary: dict = None) -> Path:
+        """Write a one-row CSV.
+
+        Columns:
+          train_*      — training-window averages
+          test_*       — stochastic final-policy evaluation
+          det_test_*   — deterministic final-policy evaluation
+        """
         path = self.data_dir / f"{self.run_name}_summary.csv"
 
-        
         def _mean(key):
             vals = [r["value"] for r in self._steps if r["metric"] == key]
             return float(np.mean(vals)) if vals else None
 
+        s = stoch_ep_summary or {}
         row = {
             "run_name": self.run_name,
-            "env": self.meta.get("env"),
-            "algo":  self.meta.get("algo"),
-            "bound":self.meta.get("bound"),
-            "seed": self.meta.get("seed"),
-            "level": self.meta.get("level"),
-            
-            "train_reward": _mean("episodic/reward"),
-            "train_cost": _mean("episodic/cost"),
-            "train_violation_rate":_mean("episodic/cost_violation_rate"),
+            "env":      self.meta.get("env"),
+            "algo":     self.meta.get("algo"),
+            "bound":    self.meta.get("bound"),
+            "seed":     self.meta.get("seed"),
+            "level":    self.meta.get("level"),
+
+            # Training
+            "train_reward":              _mean("episodic/reward"),
+            "train_cost":                _mean("episodic/cost"),
+            "train_violation_rate":      _mean("episodic/cost_violation_rate"),
             "train_cost_mean_violating": _mean("episodic/cost_mean_violating"),
-            
-            "test_reward": det_summary.get("det_test/reward_mean"),
-            "test_cost":  det_summary.get("det_test/cost_mean"),
-            "test_violation_rate": det_summary.get("det_test/cost_violation_rate"),
-            "test_cost_mean_violating": det_summary.get("det_test/cost_mean_violating"),
-            
-            "det_test_episode_costs": json.dumps(det_summary.get("det_test/episode_costs", [])),
+
+            # Stochastic final-policy test
+            "test_reward":               s.get("det_test/reward_mean"),
+            "test_cost":                 s.get("det_test/cost_mean"),
+            "test_violation_rate":       s.get("det_test/cost_violation_rate"),
+            "test_cost_mean_violating":  s.get("det_test/cost_mean_violating"),
+            "test_episode_costs":        json.dumps(s.get("det_test/episode_costs", [])),
+
+            # Deterministic final-policy test
+            "det_test_reward":               det_summary.get("det_test/reward_mean"),
+            "det_test_cost":                 det_summary.get("det_test/cost_mean"),
+            "det_test_violation_rate":       det_summary.get("det_test/cost_violation_rate"),
+            "det_test_cost_mean_violating":  det_summary.get("det_test/cost_mean_violating"),
+            "det_test_episode_costs":        json.dumps(det_summary.get("det_test/episode_costs", [])),
         }
         
         for k, v in train_final.items():
@@ -399,10 +414,32 @@ def main():
         if use_wandb and wandb.run is not None:
             wandb.run.summary.update(det_summary)
 
+        # Stochastic per-episode evaluation (for stochastic CDF and D+_norm).
+        print("\nStochastic per-episode evaluation...")
+        stoch_policy_fn = make_inference_fn(params, deterministic=False)
+        stoch_ep_summary = run_det_episodes(
+            policy_fn=stoch_policy_fn,
+            env_name=env_name,
+            safety_bound=config.safety_bound,
+            num_episodes=config.det_episodes,
+            episode_length=det_ep_length,
+            level=config.difficulty,
+            env_kwargs=det_env_kwargs,
+            seed=seed,
+        )
+        # Log stochastic metrics to wandb under test/ prefix
+        if use_wandb and wandb.run is not None:
+            wandb.run.summary.update({
+                "test/reward_mean":          stoch_ep_summary.get("det_test/reward_mean"),
+                "test/cost_mean":            stoch_ep_summary.get("det_test/cost_mean"),
+                "test/cost_violation_rate":  stoch_ep_summary.get("det_test/cost_violation_rate"),
+                "test/cost_mean_violating":  stoch_ep_summary.get("det_test/cost_mean_violating"),
+                "test/episode_costs":        stoch_ep_summary.get("det_test/episode_costs"),
+            })
 
         # Local CSV save (always)
         local_writer.save_history()
-        local_writer.save_summary(final_log, det_summary)
+        local_writer.save_summary(final_log, det_summary, stoch_ep_summary)
 
 
         # Video
