@@ -10,7 +10,7 @@ wandb/
 slurm_logs/
 *.log
 *.csv
-eval_stoch.py
+# eval_stoch.py
 
 
 

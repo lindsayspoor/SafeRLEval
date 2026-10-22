@@ -1,5 +1,4 @@
-"""Per-condition cost and reward histograms.
-"""
+
 from __future__ import annotations
 
 import json
