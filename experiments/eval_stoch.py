@@ -153,6 +153,8 @@ def main():
     p.add_argument("--runs_csv",   default="experiments/data/aggregate/runs.csv")
     p.add_argument("--models_dir", default="models/models")
     p.add_argument("--episodes",   type=int, default=100)
+    p.add_argument("--episode_length", type=int, default=None,
+                   help="Episode length for rollouts.")
     p.add_argument("--level",      type=int, default=1,
                    help="Env level to pass to envs.get_environment (default 1).")
     p.add_argument("--algos", nargs="+", default=None,
@@ -235,12 +237,15 @@ def main():
             skipped += 1
             continue
 
-        # Infer episode_length from environment.
-        try:
-            tmp_env = envs.get_environment(env, level=level)
-            ep_len  = getattr(tmp_env, "episode_length", None) or 1000
-        except Exception:
-            ep_len = 1000
+        # Use CLI override, else infer from environment (default is usually 1000).
+        if args.episode_length is not None:
+            ep_len = args.episode_length
+        else:
+            try:
+                tmp_env = envs.get_environment(env, level=level)
+                ep_len  = getattr(tmp_env, "episode_length", None) or 1000
+            except Exception:
+                ep_len = 1000
 
         try:
             result = run_stoch_episodes(
