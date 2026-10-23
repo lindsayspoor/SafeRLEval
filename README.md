@@ -1,6 +1,7 @@
 # SafeRLEval
 
-Reproducibility code for the paper "Evaluation Metrics for Safe Reinforcement Learning" (under review).
+Reproducibility code for the paper "Evaluation Metrics for Safe Reinforcement Learning" (accepted to NeurIPS 2026 Workshop: TAE (Trust-AI-Eval): Can We Trust
+AI Evaluation?).
 
 Safe reinforcement learning algorithms are commonly evaluated by reporting the cost on average, alongside the average reward. We argue that average cost alone is insufficient to capture safety and reliability of an algorithm: it does not indicate whether a policy ever violates the safety constraint, how severely it does so when it does, and whether behaviour differs between training and test time.
 
